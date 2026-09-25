@@ -56,6 +56,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--commit", action="store_true", help="有身份时提交并打 tag")
     parser.add_argument("--tag", default="v1.0.0")
+    parser.add_argument("--message", default="", help="提交信息（默认自动生成）")
     args = parser.parse_args()
 
     git = find_git()
@@ -128,19 +129,25 @@ def main() -> int:
         print('  git commit -m "CherryVoice v1.0.0: 流式语音输入法首发"')
         return 0
 
-    if run(git, "rev-parse", "HEAD", check=False).returncode == 0:
-        print("已有提交，跳过 commit（如需新提交请手动操作）")
+    has_staged = bool(run(git, "diff", "--cached", "--name-only").stdout.strip())
+    if not has_staged:
+        print("没有待提交的改动，跳过 commit")
     else:
+        message = args.message
+        if not message:
+            subject = run(git, "log", "--oneline", "-1", check=False).stdout.strip()
+            message = ("CherryVoice v1.0.0: Windows 流式语音输入法\n\n"
+                       "- WSL 流式识别服务（WebSocket，包装 Confucius4-R2T2 llama.cpp 后端）\n"
+                       "- Windows 客户端：全局热键 / 16k 采集 / 不抢焦点悬浮窗\n"
+                       "- LLM 整段修正（失败分类 + 输出校验）\n"
+                       "- 流式双语翻译（增量分段，只翻译新增部分）\n"
+                       "- 文本注入（剪贴板 + Ctrl+V，逐字键入兜底，剪贴板保护）\n"
+                       "- 设置界面 / PyInstaller 打包 / 发布前安全检查"
+                       if not subject else
+                       "补充：发布脚本、发布说明、git 化的发布前检查")
         run(git, "-c", "user.name=%s" % name, "-c", "user.email=%s" % email,
-            "commit", "-m",
-            "CherryVoice v1.0.0: Windows 流式语音输入法\n\n"
-            "- WSL 流式识别服务（WebSocket，包装 Confucius4-R2T2 llama.cpp 后端）\n"
-            "- Windows 客户端：全局热键 / 16k 采集 / 不抢焦点悬浮窗\n"
-            "- LLM 整段修正（失败分类 + 输出校验）\n"
-            "- 流式双语翻译（增量分段，只翻译新增部分）\n"
-            "- 文本注入（剪贴板 + Ctrl+V，逐字键入兜底，剪贴板保护）\n"
-            "- 设置界面 / PyInstaller 打包 / 发布前安全检查")
-        print("已提交")
+            "commit", "-m", message)
+        print("已提交：%s" % message.splitlines()[0])
 
     existing_tag = run(git, "tag", "--list", args.tag, check=False).stdout.strip()
     if existing_tag:

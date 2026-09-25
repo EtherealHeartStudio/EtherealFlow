@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -69,6 +70,53 @@ def iter_files(root: Path):
             yield Path(dirpath) / name
 
 
+def _git_exe() -> str | None:
+    import shutil
+    found = shutil.which("git")
+    if found:
+        return found
+    for cand in (r"C:\Program Files\Git\cmd\git.exe", "/usr/bin/git"):
+        if Path(cand).exists():
+            return cand
+    return None
+
+
+def tracked_files(root: Path) -> tuple[list[str] | None, str]:
+    """有 git 时用 ``git ls-files`` 拿到**真正会被提交**的清单。
+
+    这比遍历目录准得多：目录遍历只能靠 .gitignore 猜，而 git 知道确切答案。
+    返回 ``(相对路径列表, 来源说明)``；``None`` 表示 git 不可用，退回遍历。
+    """
+    if not (root / ".git").exists():
+        return None, "目录遍历（尚无 .git）"
+    git = _git_exe()
+    if not git:
+        return None, "目录遍历（找不到 git）"
+    try:
+        proc = subprocess.run([git, "ls-files"], cwd=str(root), capture_output=True,
+                              text=True, encoding="utf-8", errors="replace", timeout=60)
+        if proc.returncode != 0:
+            return None, "目录遍历（git ls-files 失败）"
+        files = [line for line in proc.stdout.splitlines() if line.strip()]
+        return files, "git ls-files（%d 个已跟踪文件）" % len(files)
+    except (OSError, subprocess.SubprocessError):
+        return None, "目录遍历（git 调用异常）"
+
+
+def untracked_not_ignored(root: Path) -> list[str]:
+    """列出**会被提交但还没 add** 的文件（用 git status，比 gitingore 猜测可靠）。"""
+    git = _git_exe()
+    if not git or not (root / ".git").exists():
+        return []
+    try:
+        proc = subprocess.run([git, "ls-files", "--others", "--exclude-standard"],
+                              cwd=str(root), capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=60)
+        return [l for l in proc.stdout.splitlines() if l.strip()]
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+
 def rel(path: Path, root: Path) -> str:
     try:
         return path.relative_to(root).as_posix()
@@ -93,8 +141,18 @@ def main() -> int:
     print("扫描仓库：%s" % root)
     print("=" * 76)
 
-    for path in sorted(iter_files(root)):
+    tracked, source = tracked_files(root)
+    if tracked is not None:
+        file_list = [root / p for p in tracked]
+        print("文件清单来源：%s ← 这才是**真正会被提交**的东西" % source)
+    else:
+        file_list = list(iter_files(root))
+        print("文件清单来源：%s" % source)
+
+    for path in sorted(file_list):
         r = rel(path, root)
+        if not path.exists():
+            continue
         scanned += 1
         size_mb = path.stat().st_size / 1024 / 1024
 
@@ -131,23 +189,30 @@ def main() -> int:
             (blockers if name == "LICENSE" else warns).append("缺少 %s" % name)
 
     # 不该出现在仓库里的东西。
-    # 注意：判断的是"会不会被提交"，不是"本地存不存在" —— .venv 本来就该在本地，
-    # 只要 .gitignore 盖住了就没事。这也是需求文档 §11.1 的原意。
+    # 有 git 时直接问 git "这个路径被跟踪了吗"，这比照 .gitignore 文本猜要准。
     ignore_text = gi.read_text(encoding="utf-8", errors="ignore") if gi.exists() else ""
     for name in MUST_NOT_SHIP:
         p = root / name
         if not p.exists():
             continue
-        covered = name in ignore_text or ("." + name) in ignore_text
-        if covered:
-            infos.append("%s 存在但已被 .gitignore 覆盖（不会提交）" % name)
-            continue
-        if name == ".venv":
-            blockers.append("仓库里存在 %s，且 .gitignore 未覆盖" % name)
-        elif name in ("config.json", "settings.json", ".env"):
-            blockers.append("仓库里存在 %s（可能含 API Key），且 .gitignore 未覆盖" % name)
+        if tracked is not None:
+            tracked_here = any(t == name or t.startswith(name + "/") for t in tracked)
+            if not tracked_here:
+                infos.append("%s 存在但未被 git 跟踪（不会提交）" % name)
+                continue
+            blocker = ("仓库里存在 %s，且**已被 git 跟踪**（必须从索引里移除）" % name)
         else:
-            warns.append("仓库里存在 %s（日志/临时目录），且 .gitignore 未覆盖" % name)
+            covered = name in ignore_text or ("." + name) in ignore_text
+            if covered:
+                infos.append("%s 存在但已被 .gitignore 覆盖（不会提交）" % name)
+                continue
+            blocker = "仓库里存在 %s，且 .gitignore 未覆盖" % name
+        if name == ".venv":
+            blockers.append(blocker)
+        elif name in ("config.json", "settings.json", ".env"):
+            blockers.append(blocker + "（可能含 API Key）")
+        else:
+            warns.append(blocker)
 
     # .gitignore 覆盖检查
     gi = root / ".gitignore"
@@ -167,6 +232,26 @@ def main() -> int:
                           ("R2T2", "外部 ASR 依赖")]:
             if kw not in text:
                 warns.append("README 未说明 %s（找不到关键词 %r）" % (label, kw))
+
+    # 还没 add 的新文件：它们不在暂存区里，但一提交就会进去，得一起扫
+    pending = untracked_not_ignored(root)
+    if pending:
+        warns.append("有 %d 个文件会被提交但还没 git add（本次已一并扫描）：%s"
+                     % (len(pending), ", ".join(pending[:6])))
+        for rel_p in pending:
+            path = root / rel_p
+            if path.suffix.lower() in TEXT_EXT and path.exists() and path.stat().st_size < 5e6:
+                content = path.read_text(encoding="utf-8", errors="ignore")
+                for name, level, pattern, why, allow in RULES:
+                    if any(a in rel_p for a in allow):
+                        continue
+                    for m in re.finditer(pattern, content):
+                        line_no = content[:m.start()].count("\n") + 1
+                        line = content.splitlines()[line_no - 1] if content else ""
+                        if ALLOW_MARKER in line:
+                            continue
+                        entry = "%s:%d  %s → %r" % (rel_p, line_no, why, m.group(0)[:60])
+                        (blockers if level == "BLOCKER" else warns).append(entry)
 
     # ---- 输出 ---- #
     if not args.quiet:
