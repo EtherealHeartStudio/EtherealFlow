@@ -194,3 +194,25 @@ python tools\check_release.py                 # 发布前安全检查
 即：**"长时间运行后变慢"在本机 20 轮内没有复现** —— 内存与显存都不涨，延迟只是正常抖动（±10%）。
 不过这只是 20 轮的观测，不是证明；真要长期挂着用，建议偶尔看一眼 `logs/service.log` 里的
 `decode_ms` 有没有系统性抬高。
+
+### 服务崩了会怎样（需求文档 风险 #2 / #6）
+
+实测 `kill -9` 掉识别服务：
+
+```
+r2t2-stream.service: Main process exited, code=killed, status=9/KILL
+r2t2-stream.service: Scheduled restart job, restart counter is at 2.
+r2t2-stream.service: Started CherryVoice R2T2 streaming ASR service
+★ 从进程消失到端口重新可用：13.4 秒
+```
+
+即 systemd 的 `Restart=always` 确实兜住了（约 13 秒 = `RestartSec=5` + 模型重新加载）。
+客户端侧会自动重连（已用 `tools/test_asr_reconnect.py` 单独验证过），
+所以用户感受到的就是"十几秒后又能用了"，不会永久失效。
+
+### 识别稳定性
+
+同一段音频重复跑 10 次，最终文本（含标点）**10/10 完全一致**。
+不过注意：标点并非在所有路径下都一样 —— 走麦克风回环时同一句话曾出现
+`酒水，也没` 与 `酒水也没` 的差异，所以需求文档 风险 #5 说的"标点抖动"
+在**换音频路径**时仍然存在，只是同一路径下是稳定的。
