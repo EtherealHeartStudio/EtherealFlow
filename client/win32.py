@@ -115,6 +115,8 @@ user32.GetClassNameW.restype = ctypes.c_int
 
 user32.PostThreadMessageW.argtypes = [wt.DWORD, ctypes.c_uint, wt.WPARAM, wt.LPARAM]
 user32.PostThreadMessageW.restype = wt.BOOL
+user32.PostMessageW.argtypes = [wt.HWND, ctypes.c_uint, wt.WPARAM, wt.LPARAM]
+user32.PostMessageW.restype = wt.BOOL
 # dwExtraInfo 用 c_void_p 而不是 POINTER(ULONG)：调用点传的是 0 / None，
 # 声明成 POINTER 的话 ctypes 只接受指针实例，会直接报
 # "expected LP_c_ulong instance instead of int"（加上 argtypes 后立刻踩到过）

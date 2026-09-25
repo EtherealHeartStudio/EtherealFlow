@@ -40,7 +40,7 @@ NEEDS_ARGTYPES = {
         "GetMonitorInfoW", "EnumWindows", "GetWindowTextW", "GetWindowTextLengthW",
         "GetClassNameW", "CallNextHookEx", "SetWindowsHookExW", "UnhookWindowsHookEx",
         "GetMessageW", "TranslateMessage", "DispatchMessageW", "PostThreadMessageW",
-        "SendInput", "keybd_event",
+        "PostMessageW", "SendInput", "keybd_event",
     ],
     "kernel32": ["GlobalAlloc", "GlobalLock", "GlobalUnlock", "GetCurrentThreadId"],
 }
