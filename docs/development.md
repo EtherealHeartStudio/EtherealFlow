@@ -56,6 +56,11 @@ docs/                   本目录
 ## 3. 自测：全部不需要人按键 / 说话 / API Key
 
 ```bash
+python tools\run_all_tests.py                     # 一键跑完（CI 也是跑这个）
+python tools\run_all_tests.py --fast              # 跳过较慢的界面/回放类
+python tools\run_all_tests.py --only llm          # 只跑名字含关键词的
+
+python tools\test_win32_signatures.py             # Win32 ctypes 签名审计
 python tools\test_overlay_focus.py --shot o.png   # 悬浮窗不抢焦点（含阳性对照）
 python tools\test_mic_path.py --wav a.wav         # 真实音频链路（虚拟声卡回环）
 python tools\test_hotkey.py                       # 热键：逻辑 + 注入探测
@@ -66,8 +71,17 @@ python tools\test_translate_flow.py --wav a.wav   # 翻译接到主流程
 python tools\test_closed_loop.py a.wav            # 完整闭环（假 LLM）
 python tools\test_settings.py                     # 设置界面配置往返（含截图）
 python tools\test_stream_client.py --wav a.wav    # 识别服务验收（零依赖）
+python tools\probe_key_injection.py 4             # 探测合成按键能否驱动两种后端
 python tools\check_release.py                     # 发布前安全检查
 ```
+
+**写测试时的第三条经验**：**Win32 的坑要写成自动化审计，不要靠 review。**
+`test_win32_signatures.py` 检查每个用到的函数是否显式声明了 `argtypes`/`restype` ——
+漏声明只在 64 位 + 句柄值较大时才发作，表现是"行为诡异"而不是报错
+（悬浮窗定位错、抢不到前台、钩子不触发）。这个审计刚写完就抓到了我自己引入的
+一处回归：给 `keybd_event` 补 `argtypes` 时把第 4 个参数写成 `POINTER(ULONG)`，
+结果所有传 `0` 的调用点立刻报 `expected LP_c_ulong instance instead of int`。
+**给已有调用点补签名时，要回头看所有调用点传的实参类型。**
 
 **写测试时的两条经验**（都是踩过才总结的）：
 
