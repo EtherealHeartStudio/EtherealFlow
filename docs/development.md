@@ -117,11 +117,31 @@ python wsl/r2t2_stream_server.py --selftest-wav /path/test.wav
 
 ## 6. 已知限制
 
-* **合成输入在受管环境里可能不生效**：`SendInput` 返回成功但
-  `GetAsyncKeyState` 看不到按键。所以热键的**真实按键**验收需要人在正常桌面会话做。
+* **合成输入在本环境下不稳定**：`SendInput` 总是返回成功，但按键**时通时不通** ——
+  投递到自己进程的前台窗口（Ctrl+V / 逐字键入）稳定可用，投递到系统级
+  （`GetAsyncKeyState`、全局钩子）则时有时无。所以热键的**真实按键**验收
+  仍需人在正常桌面会话完成。探测脚本：`tools/probe_key_injection.py`。
 * **前台锁**：`force_foreground()` 用了四级降级，但仍不保证一定抢得到前台
   （例如资源管理器反复抢占时）。这是它只作**兜底**的原因。
 * **剪贴板拦截层**：某些环境下 `SetClipboardData` 返回成功但回读仍是旧值。
   注入器因此改成「写完回读确认」才置 `restored=True`。
 * **OCR/长语音**：超过 ~45 秒的**单段**会跟不上实时，靠客户端 30 秒分段规避。
 * 模型权重按 **NetEase Model Use License**，与本仓库的 MIT 不同，商用前请自行确认。
+
+## 7. 钩子后端的两个坑（都已修，写在这里免得再踩）
+
+用 `WH_KEYBOARD_LL` 时必须注意：
+
+1. **`CallNextHookEx` 必须声明 `argtypes`。** 不声明的话 ctypes 按 Python 值猜类型，
+   `lparam` 是 64 位指针却被猜成 `c_int` → `OverflowError`。而钩子过程抛异常
+   等价于返回 0，**返回 0 表示"已处理"，Windows 会把每一个按键都吞掉**。
+   实测现象：回调进来了 6 次、每次都崩、一个热键事件都没记下来。
+   这些签名现在放在 `client/hotkey.py` **模块级** —— 放在 `_run()` 里的话，
+   任何在启动前调用 `_callback` 的路径（比如单元测试）都会重现这个 bug。
+2. **钩子报的是左右专用的修饰键。** 按住左 Ctrl 收到的是 `VK_LCONTROL=0xA2`，
+   而不是 `VK_CONTROL=0x11`；Alt 是 `0xA4`，Shift 是 `0xA0`。
+   不做归一化，组合键**永远配不上**，表现为"钩子装上了但按了没反应"。
+   归一化在 `hotkey.canonical_vk()`，回归测试在 `tools/test_hotkey.py` 的 C 段。
+
+顺带一提：`SetWindowsHookExW` 也**必须声明 restype**，否则 64 位句柄被截成 32 位，
+卸载钩子会静默失败。

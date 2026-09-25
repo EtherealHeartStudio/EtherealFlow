@@ -36,6 +36,7 @@ from client.hotkey import create_hotkey, normalize_keys  # noqa: E402
 
 TEST_KEYS = ["ctrl", "alt"]
 VK_CONTROL, VK_MENU, VK_ESCAPE = 0x11, 0x12, 0x1B
+VK_LCONTROL, VK_LWIN = 0xA2, 0x5B      # 钩子报的是左右专用的修饰键
 
 
 # --------------------------------------------------------------------------- #
@@ -150,6 +151,47 @@ def test_backend_injection(backend: str) -> tuple[bool, str]:
 
 # --------------------------------------------------------------------------- #
 
+def test_hook_state_machine() -> tuple[bool, str]:
+    """确定性验证**钩子后端的状态机**（不需要真按键）。
+
+    为什么必须单独测这一段：低级钩子报的修饰键是**左右分开**的
+    （``VK_LCONTROL=0xA2``），而配置里写的是通用 VK（``VK_CONTROL=0x11``）。
+    不做归一化的话组合键永远配不上 —— 实测就是这样，钩子收到了 0xA2/0xA4
+    却一个事件都没触发。这里直接构造 ``KBDLLHOOKSTRUCT`` 喂给回调，
+    把这条路径钉死。
+    """
+    from client.hotkey import (KBDLLHOOKSTRUCT, WM_KEYDOWN, WM_KEYUP,  # noqa: E402
+                               HookHotkey, canonical_vk)
+
+    events: list[str] = []
+    hk = HookHotkey(keys=["ctrl", "win"], swallow=False,
+                    on_press=lambda: events.append("press"),
+                    on_release=lambda: events.append("release"),
+                    on_cancel=lambda: events.append("cancel"))
+
+    def feed(vk: int, down: bool) -> None:
+        kb = KBDLLHOOKSTRUCT(vkCode=vk, scanCode=0, flags=0, time=0, dwExtraInfo=None)
+        hk._callback(0, WM_KEYDOWN if down else WM_KEYUP,   # noqa: SLF001
+                     ctypes.addressof(kb))
+
+    # 用**左右专用**的修饰键喂进去，模拟真实钩子输入
+    feed(VK_LCONTROL, True)          # 0xA2，只按 Ctrl → 不该触发
+    only_ctrl = list(events)
+    feed(VK_LWIN, True)              # 0x5B，组合成立 → press
+    after_press = list(events)
+    feed(VK_LWIN, False)
+    feed(VK_LCONTROL, False)         # 全松开 → release
+    final = list(events)
+
+    aliases_ok = (canonical_vk(0xA2) == VK_CONTROL and canonical_vk(0xA4) == VK_MENU
+                  and canonical_vk(0xA0) == 0x10 and canonical_vk(0x5B) == 0x5B)
+    ok = (aliases_ok and only_ctrl == [] and after_press == ["press"]
+          and final == ["press", "release"])
+    return ok, ("修饰键归一化=%s；事件序列=%s（期望 press→release；只按左右专用 Ctrl 时=%s）"
+                % ("正确" if aliases_ok else "错误", final or "（无）",
+                   only_ctrl or "无事件"))
+
+
 def main() -> int:
     print("键位解析：ctrl+win → %s" % (normalize_keys(["ctrl", "win"]),))
     print("键位解析：ctrl+alt → %s" % (normalize_keys(TEST_KEYS),))
@@ -159,11 +201,16 @@ def main() -> int:
 
     rows: list[tuple[str, bool, str]] = []
     ok, detail = test_logic()
-    rows.append(("A. 逻辑：按住/松开/Esc 取消 三条边沿", ok, detail))
+    rows.append(("A. 轮询后端：按住/松开/Esc 取消 三条边沿", ok, detail))
+
+    ok_c, detail_c = test_hook_state_machine()
+    rows.append(("C. 钩子后端状态机（左右专用修饰键 VK）", ok_c, detail_c))
 
     visible, why = injection_visible()
     if not visible:
-        rows.append(("B. 真实按键注入探测", True, "[SKIP] " + why))
+        rows.append(("B. 真实按键注入探测", True,
+                     "[SKIP] " + why + "（本环境合成输入是否投递并不稳定，"
+                     "热键的最终验收仍需人在正常桌面完成）"))
     else:
         for backend in ("polling", "hook"):
             ok_b, detail_b = test_backend_injection(backend)
