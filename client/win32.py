@@ -66,6 +66,66 @@ class MONITORINFO(ctypes.Structure):
                 ("rcWork", wt.RECT), ("dwFlags", wt.DWORD)]
 
 
+WNDENUMPROC = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+
+# --------------------------------------------------------------------------- #
+# 其余 Win32 签名（**集中声明，一个都不能省**）
+#
+# 为什么必须写全：不声明时 ctypes 按 Python 值猜类型 ——
+#   * 传句柄/指针进来 → 猜成 c_int（32 位），值 ≥ 2^31 直接 OverflowError；
+#   * 返回值是句柄 → restype 默认 c_int，**64 位句柄被截断**。
+# 两者都只在 64 位 + 句柄值较大时才发作，表现是"行为诡异"而不是报错：
+# 悬浮窗定位错、抢不到前台、钩子不触发。上一轮已经在钩子上踩过一次
+# （CallNextHookEx 漏声明 → 把每个按键都吞掉）。
+# `tools/test_win32_signatures.py` 会持续检查这张表。
+# --------------------------------------------------------------------------- #
+
+user32.EmptyClipboard.argtypes = []
+user32.EmptyClipboard.restype = wt.BOOL
+user32.CloseClipboard.argtypes = []
+user32.CloseClipboard.restype = wt.BOOL
+user32.EnumClipboardFormats.argtypes = [ctypes.c_uint]
+user32.EnumClipboardFormats.restype = ctypes.c_uint
+
+user32.SetForegroundWindow.argtypes = [wt.HWND]
+user32.SetForegroundWindow.restype = wt.BOOL
+user32.BringWindowToTop.argtypes = [wt.HWND]
+user32.BringWindowToTop.restype = wt.BOOL
+user32.SwitchToThisWindow.argtypes = [wt.HWND, wt.BOOL]
+user32.SwitchToThisWindow.restype = None
+user32.AttachThreadInput.argtypes = [wt.DWORD, wt.DWORD, wt.BOOL]
+user32.AttachThreadInput.restype = wt.BOOL
+
+user32.GetCursorPos.argtypes = [ctypes.POINTER(wt.POINT)]
+user32.GetCursorPos.restype = wt.BOOL
+# HMONITOR 是句柄：restype 不声明就会被截成 32 位
+user32.MonitorFromPoint.argtypes = [wt.POINT, wt.DWORD]
+user32.MonitorFromPoint.restype = ctypes.c_void_p
+user32.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.POINTER(MONITORINFO)]
+user32.GetMonitorInfoW.restype = wt.BOOL
+
+user32.EnumWindows.argtypes = [WNDENUMPROC, wt.LPARAM]
+user32.EnumWindows.restype = wt.BOOL
+user32.GetWindowTextW.argtypes = [wt.HWND, wt.LPWSTR, ctypes.c_int]
+user32.GetWindowTextW.restype = ctypes.c_int
+user32.GetWindowTextLengthW.argtypes = [wt.HWND]
+user32.GetWindowTextLengthW.restype = ctypes.c_int
+user32.GetClassNameW.argtypes = [wt.HWND, wt.LPWSTR, ctypes.c_int]
+user32.GetClassNameW.restype = ctypes.c_int
+
+user32.PostThreadMessageW.argtypes = [wt.DWORD, ctypes.c_uint, wt.WPARAM, wt.LPARAM]
+user32.PostThreadMessageW.restype = wt.BOOL
+# dwExtraInfo 用 c_void_p 而不是 POINTER(ULONG)：调用点传的是 0 / None，
+# 声明成 POINTER 的话 ctypes 只接受指针实例，会直接报
+# "expected LP_c_ulong instance instead of int"（加上 argtypes 后立刻踩到过）
+user32.keybd_event.argtypes = [ctypes.c_ubyte, ctypes.c_ubyte, ctypes.c_uint,
+                               ctypes.c_void_p]
+user32.keybd_event.restype = None
+
+kernel32.GetCurrentThreadId.argtypes = []
+kernel32.GetCurrentThreadId.restype = wt.DWORD
+
+
 # --------------------------------------------------------------------------- #
 # DPI
 # --------------------------------------------------------------------------- #
@@ -250,7 +310,6 @@ def force_foreground(hwnd: int) -> bool:
 def find_window_by_pid(pid: int) -> Optional[int]:
     """枚举顶层可见窗口，返回属于该 pid 的第一个。"""
     found: list[int] = []
-    WNDENUMPROC = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
 
     def _cb(hwnd, _lparam):
         if user32.IsWindowVisible(hwnd) and window_pid(hwnd) == pid:

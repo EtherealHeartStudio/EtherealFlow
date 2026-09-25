@@ -33,11 +33,7 @@ jobs:
         run: python -m compileall -q client run_client.py scripts
 
       - name: 离线自测（不需要识别服务 / 麦克风 / API Key）
-        run: |
-          python tools/test_llm.py
-          python tools/test_translator.py
-          python tools/test_settings.py
-          python tools/test_hotkey.py
+        run: python tools/run_all_tests.py
 
       - name: 发布前安全检查
         run: python tools/check_release.py

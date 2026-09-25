@@ -114,51 +114,25 @@ python wsl/r2t2_stream_server.py --selftest-wav /path/to/test.wav
 ## 自测（都不需要人按键 / 不需要人说话）
 
 ```bash
-# 1. 悬浮窗不抢焦点 —— 需求文档列为「最该先验证的」
-#    带阳性对照：会另外开一个普通窗口，确认检测器真的能发现抢焦点行为
-python tools\test_overlay_focus.py --shot overlay.png
+# 一键跑完所有离线自测（推荐；CI 也是跑这个）
+python tools\run_all_tests.py
+python tools\run_all_tests.py --fast          # 跳过较慢的界面/回放类
+python tools\run_all_tests.py --only llm      # 只跑名字含关键词的
 
-# 2. 真实音频采集链路（走本机 VB-Audio 虚拟声卡回环，无需对着麦克风说话）
-python tools\test_mic_path.py --wav some16k.wav
-
-# 3. 全局热键：确定性逻辑验证 + 真实按键注入探测
-python tools\test_hotkey.py
-
-# 4. 文本注入：剪贴板规则 + Ctrl+V 注入 + 逐字键入
-python tools\test_injection.py
-
-# 5. LLM 修正/翻译的失败分类与输出校验（本地假服务，不需要 API Key）
-python tools\test_llm.py
-
-# 6. 完整闭环：识别 → LLM 修正 → 注入前台输入框（本地假 LLM）
-python tools\test_closed_loop.py some16k.wav
-
-# 7. 流式翻译：三种触发条件 + 只翻新增部分（假 LLM，无需 Key）
-python tools\test_translator.py
-
-# 8. 流式翻译接到主流程（开启=提交译文 / 关闭=提交原文 / 失败=回退原文）
-python tools\test_translate_flow.py some16k.wav
-
-# 9. 端到端：回放一份 WAV，走完整的「热键回调 → 采集 → 识别 → 悬浮窗」链路
-python -m client.app --replay some16k.wav --exit-after-final
-
-# 10. 只跑识别+决策、不往任何窗口灌字
-python -m client.app --replay some16k.wav --exit-after-final --inject-mode none --no-llm
-
-# 11. 开启流式翻译（提交译文而不是原文）
-python -m client.app --translate --target-language English
-
-# 12. 打开设置界面（FR-7 六个分组）
-python -m client.app --settings
-
-# 13. 设置界面配置往返自测（含截图）
-python tools\test_settings.py
-
-# 14. **发布前安全检查**：扫 API Key / 个人路径 / 模型权重 / .gitignore 覆盖
-python tools\check_release.py
-
-# 15. 列出可用的输入设备
-python -m client.app --list-devices
+# 也可以单独跑：
+python tools\test_win32_signatures.py         # Win32 ctypes 签名审计（防 64 位截断）
+python tools\test_overlay_focus.py --shot overlay.png   # 悬浮窗不抢焦点（含阳性对照）
+python tools\test_mic_path.py --wav a.wav     # 真实音频链路（虚拟声卡回环）
+python tools\test_hotkey.py                   # 热键：轮询逻辑 + 钩子状态机
+python tools\test_injection.py                # 注入：剪贴板规则 + Ctrl+V / 键入
+python tools\test_llm.py                      # LLM 失败分类与输出校验（假服务）
+python tools\test_translator.py               # 增量翻译：三种触发 + 只翻新增
+python tools\test_translate_flow.py a.wav     # 翻译接到主流程
+python tools\test_closed_loop.py a.wav        # 完整闭环（假 LLM）
+python tools\test_settings.py                 # 设置界面配置往返（含截图）
+python tools\test_stream_client.py --wav a.wav  # 识别服务验收（零依赖）
+python tools\probe_key_injection.py           # 探测合成按键能否驱动热键
+python tools\check_release.py                 # 发布前安全检查
 ```
 
 > `tools\check_release.py` 退出码非 0 就**不许发布**。它自己也被验证过：
