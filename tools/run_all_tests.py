@@ -44,6 +44,7 @@ TESTS: list[tuple[str, str, bool]] = [
     ("配置往返", "tools/test_settings.py", False),
     ("LLM 失败分类", "tools/test_llm.py", False),
     ("增量翻译", "tools/test_translator.py", False),
+    ("音频降级路径", "tools/test_audio_fallback.py", False),
     ("热键逻辑+钩子状态机", "tools/test_hotkey.py", False),
     ("识别客户端重连", "tools/test_asr_reconnect.py", True),
     ("发布前安全检查", "tools/check_release.py", False),
