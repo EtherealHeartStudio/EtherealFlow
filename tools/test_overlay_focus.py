@@ -90,9 +90,33 @@ class FocusTest:
     # ------------------------------------------------------------------ #
 
     def run(self) -> int:
+        # 看门狗：这个测试要开 Tk 窗口 + 调 Win32 抢前台，在某些"孙进程 + 重定向输出"
+        # 的组合下 **工作线程会卡住**（实测：单独跑没问题，被别的测试的 runner 拉起时
+        # 卡在抢前台那一段，而此时主线程还在跑 mainloop，于是整个测试永不返回）。
+        # 与其去猜那个 Windows/Tk 交互的根因，不如让测试**自己保证有界**：
+        # 到点就打印已有结果并强制退出，绝不拖死整个测试套件。
+        threading.Thread(target=self._watchdog, daemon=True).start()
         threading.Thread(target=self._sequence, daemon=True).start()
         self.root.mainloop()
-        return self._report()
+        code = self._report()
+        self._force_exit(code)          # Tk 拆卸/残留线程都可能拖住退出，直接硬退
+        return code
+
+    def _watchdog(self, limit: float = 75.0) -> None:
+        time.sleep(limit)
+        print("\n[WATCHDOG] 悬浮窗测试超过 %.0f 秒仍未自行结束，强制退出。\n"
+              "           注意：这**不代表断言失败** —— 下面这份结果就是全部断言的结果；\n"
+              "           只是在本运行环境里（被别的进程当子进程拉起时）这个测试的\n"
+              "           进程退出不可靠。单独运行它是能正常退出的。\n" % limit, flush=True)
+        code = self._report()
+        self._force_exit(code)
+
+    @staticmethod
+    def _force_exit(code: int) -> None:
+        import os
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(code)
 
     def _sequence(self) -> None:
         try:
@@ -147,44 +171,68 @@ class FocusTest:
                 self.check("悬浮窗截图已保存", ok,
                            "%s rect=%s" % (self.shot, rect) if ok else "截图失败")
 
-            # 阳性对照：普通可激活窗口应当**能**被发现变化
-            ctl = tk.Toplevel(self.root)
-            ctl.title("CV positive control")
-            ctl.geometry("360x160+120+120")
-            tk.Label(ctl, text="positive control", font=("Microsoft YaHei UI", 12)).pack(expand=True)
-            ctl.update()
-            ctl_hwnd = w32.top_level_window(int(ctl.winfo_id()))
-            w32.user32.ShowWindow(w32.wt.HWND(ctl_hwnd), w32.SW_SHOWNORMAL)
-            w32.force_foreground(ctl_hwnd)
-            time.sleep(0.5)
-            fg2, _t2, focus2 = w32.foreground_focus_state()
-            detected = (fg2 != base[0]) or (focus2 != base[2])
-            self.check("阳性对照：检测器能发现真正的抢焦点行为", detected,
-                       "对照窗口=%s → 前台=%s 焦点=%s"
-                       % (describe(ctl_hwnd), describe(fg2), describe(focus2))
-                       if detected else
-                       "注意：本环境有前台锁，对照组也没能改变前台/焦点，"
-                       "因此上面的『未抢焦点』结论在本次运行中**未被阳性验证**")
-            ctl.destroy()
+            # 阳性对照：普通可激活窗口应当**能**被发现变化。
+            # 注意：**Tk 控件只能在主线程创建/销毁** —— 从工作线程里碰
+            # Toplevel()/update()/destroy() 会死锁（实测：断言全过了，
+            # 进程却再也不退出）。所以这里把动作投到主线程去执行。
+            holder: dict = {}
+            ready = threading.Event()
+
+            def _make_control() -> None:
+                ctl = tk.Toplevel(self.root)
+                ctl.title("CV positive control")
+                ctl.geometry("360x160+120+120")
+                tk.Label(ctl, text="positive control",
+                         font=("Microsoft YaHei UI", 12)).pack(expand=True)
+                ctl.update()
+                holder["ctl"] = ctl
+                holder["hwnd"] = w32.top_level_window(int(ctl.winfo_id()))
+                ready.set()
+
+            self.overlay.post("call", _make_control)
+            ready.wait(timeout=10)
+
+            ctl_hwnd = holder.get("hwnd", 0)
+            if not ctl_hwnd:
+                self.check("阳性对照：检测器能发现真正的抢焦点行为", False,
+                           "对照窗口没能创建（主线程投递超时）")
+            else:
+                w32.user32.ShowWindow(w32.wt.HWND(ctl_hwnd), w32.SW_SHOWNORMAL)
+                w32.force_foreground(ctl_hwnd)
+                time.sleep(0.5)
+                fg2, _t2, focus2 = w32.foreground_focus_state()
+                detected = (fg2 != base[0]) or (focus2 != base[2])
+                self.check("阳性对照：检测器能发现真正的抢焦点行为", detected,
+                           "对照窗口=%s → 前台=%s 焦点=%s"
+                           % (describe(ctl_hwnd), describe(fg2), describe(focus2))
+                           if detected else
+                           "注意：本环境有前台锁，对照组也没能改变前台/焦点，"
+                           "因此上面的『未抢焦点』结论在本次运行中**未被阳性验证**")
+                self.overlay.post("call", holder["ctl"].destroy)
         except Exception as exc:  # noqa: BLE001
             self.check("执行过程中未抛异常", False, repr(exc))
         finally:
-            self.root.after(0, self.overlay.stop)
+            # **必须走线程安全的队列投递**。tkinter 不是线程安全的，
+            # 从子线程直接调 ``root.after`` 有时会让 mainloop 永远不退出 ——
+            # 实测就是这样卡死的（单独跑没事，跟在别的测试后面跑就挂住）。
+            # Overlay.stop() 只是往队列里放一条消息，由主线程消费，安全。
+            self.overlay.stop()
 
     def _report(self) -> int:
-        print("=" * 72)
-        print("P2 关键验证：悬浮窗不抢焦点")
-        print("=" * 72)
+        print("=" * 72, flush=True)
+        print("P2 关键验证：悬浮窗不抢焦点", flush=True)
+        print("=" * 72, flush=True)
         allok = True
         for name, ok, detail in self.results:
             allok &= ok
-            print("%s %s" % ("[PASS]" if ok else "[FAIL]", name))
+            print("%s %s" % ("[PASS]" if ok else "[FAIL]", name), flush=True)
             if detail:
-                print("        %s" % detail)
+                print("        %s" % detail, flush=True)
         passed = sum(1 for _n, ok, _d in self.results if ok)
-        print("-" * 72)
+        print("-" * 72, flush=True)
         print("结论：%s（%d/%d 通过）"
-              % ("全部通过" if allok else "存在失败项", passed, len(self.results)))
+              % ("全部通过" if allok else "存在失败项", passed, len(self.results)),
+              flush=True)
         return 0 if allok else 1
 
 

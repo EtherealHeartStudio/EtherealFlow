@@ -24,6 +24,19 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PY = sys.executable
+# 进度同时落盘：某些执行环境要等进程结束才回传 stdout，
+# 万一卡住就什么都看不到；写文件的话超时后还能知道卡在哪一个。
+PROGRESS = ROOT / "build" / "test_progress.log"
+
+
+def note(text: str) -> None:
+    print(text, flush=True)
+    try:
+        PROGRESS.parent.mkdir(parents=True, exist_ok=True)
+        with open(PROGRESS, "a", encoding="utf-8") as fh:
+            fh.write(text + "\n")
+    except OSError:
+        pass
 
 # (名字, 脚本, 是否较慢, 需要的额外参数)
 TESTS: list[tuple[str, str, bool]] = [
@@ -32,6 +45,7 @@ TESTS: list[tuple[str, str, bool]] = [
     ("LLM 失败分类", "tools/test_llm.py", False),
     ("增量翻译", "tools/test_translator.py", False),
     ("热键逻辑+钩子状态机", "tools/test_hotkey.py", False),
+    ("识别客户端重连", "tools/test_asr_reconnect.py", True),
     ("发布前安全检查", "tools/check_release.py", False),
     ("悬浮窗不抢焦点", "tools/test_overlay_focus.py", True),
     ("文本注入", "tools/test_injection.py", True),
@@ -68,14 +82,18 @@ def main() -> int:
             continue
         selected.append((name, script))
 
-    print("将运行 %d 个测试（Python: %s）" % (len(selected), PY))
-    print("=" * 78)
+    try:
+        PROGRESS.unlink()
+    except OSError:
+        pass
+    note("将运行 %d 个测试（Python: %s）" % (len(selected), PY))
+    note("=" * 78)
     results = []
     for name, script in selected:
-        print("… %s" % name, flush=True)
+        note("… %s 开始" % name)
         name, ok, code, detail = run_one(name, script, ROOT)
         results.append((name, ok, code, detail))
-        print("  %s %s" % ("[PASS]" if ok else "[FAIL]", detail))
+        note("  %s %s" % ("[PASS]" if ok else "[FAIL]", detail))
 
     print("=" * 78)
     print("%-26s %s" % ("测试", "结果"))

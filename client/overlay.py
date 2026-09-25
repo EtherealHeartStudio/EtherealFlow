@@ -151,13 +151,31 @@ class Overlay:
     # -- 主线程内部 -------------------------------------------------------- #
 
     def _drain(self) -> None:
-        try:
-            while True:
+        """主线程的消费循环。
+
+        **这个循环绝对不能死。** 它靠 ``root.after`` 把自己排回去；
+        如果处理某一条消息时抛了别的东西（几何计算、Tcl 调用……），
+        异常会直接冲出函数、**跳过重排**，从此再也没有人消费队列 ——
+        表现为：文字不再更新、``hide()`` 也永远不生效、窗口僵在屏幕上。
+
+        实测踩到过：测试里工作线程已经跑完全部断言，主循环却再也不退出。
+        所以这里逐条兜异常，并且**保证无论如何都重排自己**。
+        """
+        while True:
+            try:
                 kind, value = self._q.get_nowait()
+            except queue.Empty:
+                break
+            try:
                 self._apply(kind, value)
-        except queue.Empty:
+            except tk.TclError:
+                pass          # 窗口已被销毁，正常现象
+            except Exception:  # noqa: BLE001  单条更新出错绝不能拖死循环
+                pass
+        try:
+            self._tick_timer()
+        except Exception:  # noqa: BLE001
             pass
-        self._tick_timer()
         try:
             self.root.after(30, self._drain)
         except tk.TclError:
@@ -190,6 +208,12 @@ class Overlay:
             self.visible = False
         elif kind == "hide_in":
             self.root.after(max(0, int(value * 1000)), self.hide)
+        elif kind == "call":
+            # 在 Tk 主线程上执行一个回调。
+            # 存在的理由：tkinter **不是线程安全的**，从别的线程碰 Tk 控件
+            # （哪怕只是 Toplevel().update()）都可能死锁。需要从后台线程操作
+            # 窗口时，把动作包成函数投进来，交给主线程做。
+            value()
         elif kind == "quit":
             if not getattr(self, "_closing", False):
                 self._closing = True

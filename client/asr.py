@@ -48,6 +48,9 @@ class AsrClient:
         self.last_error = ""
         self.session_open = False
         self._rotating = False
+        # 记住本次会话的 start 参数：断线重连后要**用同样的参数**重开会话，
+        # 否则续传的音频会被服务端按默认参数自动开会话（语言提示、热词全丢）。
+        self._session_args: dict = {"language": None, "context": ""}
 
     # -- 对外 -------------------------------------------------------------- #
 
@@ -59,7 +62,8 @@ class AsrClient:
 
     def begin_session(self, language: Optional[str] = None, context: str = "") -> None:
         self.session_open = True
-        self._q.put(("start", {"type": "start", "language": language, "context": context}))
+        self._session_args = {"language": language, "context": context}
+        self._q.put(("start", {"type": "start", **self._session_args}))
 
     def feed(self, pcm: bytes) -> None:
         if self._q.qsize() > MAX_QUEUE_BLOCKS:
@@ -112,6 +116,11 @@ class AsrClient:
                     self.last_error = ""
                     self.on_status("connected")
                     backoff = 0.5
+                    # 断线时如果这次说话还没结束，得用**原来的参数**补一个 start，
+                    # 否则续传的音频会被服务端按默认参数自动开会话。
+                    if self.session_open:
+                        ws.send(json.dumps({"type": "start", **self._session_args},
+                                           ensure_ascii=False))
                     self._pump(ws)
             except Exception as exc:  # noqa: BLE001
                 self.connected = False
