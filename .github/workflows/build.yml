@@ -1,0 +1,55 @@
+name: build
+
+# 需求文档 §11.2：用 GitHub Actions 或本地构建 Windows 安装包/可执行文件。
+# 本地等价命令：python scripts/build_exe.py
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "client/**"
+      - "run_client.py"
+      - "scripts/build_exe.py"
+      - ".github/workflows/build.yml"
+
+jobs:
+  windows-exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy sounddevice websockets pyinstaller
+
+      - name: 语法自检
+        run: python -m compileall -q client run_client.py scripts
+
+      - name: 离线自测（不需要识别服务 / 麦克风 / API Key）
+        run: |
+          python tools/test_llm.py
+          python tools/test_translator.py
+          python tools/test_settings.py
+          python tools/test_hotkey.py
+
+      - name: 发布前安全检查
+        run: python tools/check_release.py
+
+      - name: 打包 exe
+        run: python scripts/build_exe.py
+
+      - name: 产物自检
+        run: dist\CherryVoice\CherryVoice.exe --list-devices
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CherryVoice-windows-x64
+          path: build/dist/CherryVoice/
+          if-no-files-found: error

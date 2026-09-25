@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# 模型权重（GB 级，绝不提交）
+*.gguf
+*.safetensors
+models/
+
+# 日志与运行产物
+logs/
+*.log
+
+# 本地配置：可能含 API Key / 个人路径，绝不提交
+config.local.json
+config.json
+settings.local.json
+.env
+.env.*
+
+# 构建产物
+build/
+dist/
+*.spec
+*.exe
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

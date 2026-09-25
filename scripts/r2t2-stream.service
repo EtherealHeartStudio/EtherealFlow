@@ -1,0 +1,18 @@
+[Unit]
+Description=CherryVoice R2T2 streaming ASR service (WebSocket)
+Documentation=https://github.com/
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=@APP_DIR@
+ExecStart=@APP_DIR@/start_stream_server.sh
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+# 模型常驻显存约 2.5 GB；显存不足时会被 OOM 杀掉，Restart 会重试
+TimeoutStopSec=20
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=default.target
