@@ -76,12 +76,27 @@ def list_windows() -> dict[int, tuple[int, str, str]]:
 
 
 class App:
-    def __init__(self, name: str, exe: str, classes: tuple[str, ...] = ()) -> None:
+    def __init__(self, name: str, exe: str, classes: tuple[str, ...] = (),
+                 args: list[str] | None = None) -> None:
         self.name = name
         self.exe = exe
         self.classes = classes          # 主窗口类名提示，用于在差集里挑对窗口
+        self.args = args or []
         self.proc: subprocess.Popen | None = None
         self.hwnd = 0
+
+
+def make_chrome_page() -> str:
+    """给 Chrome 造一个带自动聚焦文本框的本地页面，作为注入靶子。"""
+    page = Path.home() / "AppData/Local/Temp/cv-inject-target.html"
+    page.write_text(
+        "<!doctype html><meta charset='utf-8'><title>CherryVoice 注入靶</title>"
+        "<body style='margin:0'>"
+        "<textarea id='t' autofocus style='width:100%;height:92vh;font-size:18px;"
+        "border:0;outline:0;padding:24px'></textarea>"
+        "<script>document.getElementById('t').focus()</script>",
+        encoding="utf-8")
+    return page.as_uri()
 
 
 def launch(app: App, timeout: float = 15.0) -> tuple[bool, str]:
@@ -93,7 +108,7 @@ def launch(app: App, timeout: float = 15.0) -> tuple[bool, str]:
     """
     before = set(list_windows())
     try:
-        app.proc = subprocess.Popen([app.exe])
+        app.proc = subprocess.Popen([app.exe, *app.args])
     except OSError as exc:
         return False, "启动失败：%s" % exc
     deadline = time.time() + timeout
@@ -178,9 +193,15 @@ def main() -> int:
     parser.add_argument("--app", default="", help="只测名字含该关键词的应用")
     args = parser.parse_args()
 
+    chrome = Path.home() / "AppData/Local/Google/Chrome/Application/chrome.exe"
+    profile = Path.home() / "AppData/Local/Temp/cv-chrome-profile"
     apps = [
         App("记事本", r"C:\WINDOWS\system32\notepad.exe", ("Notepad",)),
         App("Word", WINWORD, ("OpusApp",)),
+        App("Chrome", str(chrome), ("Chrome_WidgetWin_1",),
+            # 用**独立临时配置**开新窗口：不去动用户正在用的那个 Chrome
+            args=["--user-data-dir=" + str(profile), "--no-first-run",
+                  "--no-default-browser-check", "--new-window", make_chrome_page()]),
         App("VS Code", r"C:\Program Files\Microsoft VS Code\Code.exe",
             ("Chrome_WidgetWin_1",)),
         App("微信", r"C:\Program Files (x86)\Tencent\WeChat\WeChat.exe",
