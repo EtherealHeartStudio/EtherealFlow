@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""CherryVoice · 不抢焦点的悬浮窗（tkinter + Win32 扩展样式）。
+"""EtherealFlow · 不抢焦点的悬浮窗（tkinter + Win32 扩展样式）。
 
 关键约束（需求文档 FR-3 / 风险 #1 —— 「最该先验证的」）：
 

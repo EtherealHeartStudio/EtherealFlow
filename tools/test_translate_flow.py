@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""CherryVoice · P4 集成验证：翻译开关真的接到了主流程上。
+"""EtherealFlow · P4 集成验证：翻译开关真的接到了主流程上。
 
 验证三件事（用本地假 LLM，不需要 API Key）：
 

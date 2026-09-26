@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""CherryVoice · 按住/松开全局热键（FR-1）。
+"""EtherealFlow · 按住/松开全局热键（FR-1）。
 
 两种后端，接口一致，可配置切换：
 

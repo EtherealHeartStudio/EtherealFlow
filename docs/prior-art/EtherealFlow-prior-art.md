@@ -1,4 +1,4 @@
-# CherryVoice 前期调研:三个开源项目的代码级发现
+# EtherealFlow 前期调研:三个开源项目的代码级发现
 
 基于 GitHub API 文件树 + raw.githubusercontent.com 实读源码(非 README)。未读到的内容不写入。
 
@@ -122,4 +122,4 @@ Output: 我们这个项目进展比较顺利，预算方面也没有超支
 
 2. **失败必须分类,不能一律降级或一律报错。** CapsWriter 的 `should_fallback_to_original()` 区别对待「认证/连接/API 错误」(弹窗让用户修配置)与「超时/限流」(静默回退原识别文本),这正是"松开热键不能丢字"的关键。配合 openwhispr 的三档超时(30s/60s/600s)、`LLM_REQUEST_TIMEOUT` 不重试,以及 opentypeless"只重试建连、不重试流式",可定成:热键松开即发起修正请求,`p95` 内未返回先注入 ASR 原文,修正结果到达后原地替换。
 
-3. **prompt 工程要有"优先级 section + 长度上限 + 输出校验"三件套,尾部留给最关键指令。** opentypeless 的顺序化 section system prompt(有测试锁死顺序)与 2000/4000 字符硬上限,openwhispr 的后缀依序追加并把 `PLAIN_TEXT_RESPONSE_SUFFIX` 放最后、以及 `assertValidCleanupOutput()` 的复读检测(`CLEANUP_OUTPUT_INVALID` 时保留原文),都是低成本高收益约束。对 CherryVoice 尤其直接适用:既然要注入当前输入框,就必须像 openwhispr 那样在尾部强制**纯文本、无 Markdown**,并在校验长度与复读后才注入。
+3. **prompt 工程要有"优先级 section + 长度上限 + 输出校验"三件套,尾部留给最关键指令。** opentypeless 的顺序化 section system prompt(有测试锁死顺序)与 2000/4000 字符硬上限,openwhispr 的后缀依序追加并把 `PLAIN_TEXT_RESPONSE_SUFFIX` 放最后、以及 `assertValidCleanupOutput()` 的复读检测(`CLEANUP_OUTPUT_INVALID` 时保留原文),都是低成本高收益约束。对 EtherealFlow 尤其直接适用:既然要注入当前输入框,就必须像 openwhispr 那样在尾部强制**纯文本、无 Markdown**,并在校验长度与复读后才注入。

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""CherryVoice · 验证 LLM 修正/翻译的**失败分类**与**输出校验**。
+"""EtherealFlow · 验证 LLM 修正/翻译的**失败分类**与**输出校验**。
 
 不需要真的 API Key：起一个本地假 OpenAI 服务，用开关切换各种故障，
 逐个断言"该降级的降级、该提示的提示"。
@@ -80,7 +80,7 @@ class Handler(BaseHTTPRequestHandler):
             "ok": CORRECTED,
             "echo": original + original,
             "empty": "",
-            "hotword_echo": "CherryVoice、Confucius4、R2T2",
+            "hotword_echo": "EtherealFlow、Confucius4、R2T2",
             "markdown": "```text\n" + CORRECTED + "\n```",
             "prefixed": "修正后的文本：" + CORRECTED,
             "quoted": "“" + CORRECTED + "”",
@@ -122,8 +122,8 @@ def main() -> int:
 
     expect_bad("复读两遍", ORIGINAL, ORIGINAL + ORIGINAL)
     expect_bad("空输出", ORIGINAL, "   ")
-    expect_bad("把热词表当结果", ORIGINAL, "CherryVoice、Confucius4、R2T2",
-               ["CherryVoice", "Confucius4", "R2T2"])
+    expect_bad("把热词表当结果", ORIGINAL, "EtherealFlow、Confucius4、R2T2",
+               ["EtherealFlow", "Confucius4", "R2T2"])
     expect_bad("长度失控", ORIGINAL, "测试" * 200)
 
     check("剥掉 Markdown 代码块",
@@ -160,7 +160,7 @@ def main() -> int:
     ]
     for mode, want_changed, want_deg, want_notify, want_code, label in cases:
         MODE["value"] = mode
-        out = client.correct(ORIGINAL, hotwords=["CherryVoice", "Confucius4", "R2T2"])
+        out = client.correct(ORIGINAL, hotwords=["EtherealFlow", "Confucius4", "R2T2"])
         ok = (out.changed == want_changed and out.degraded == want_deg
               and out.notify == want_notify
               and (want_code == "" or out.code == want_code)

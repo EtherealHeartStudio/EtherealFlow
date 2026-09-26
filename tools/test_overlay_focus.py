@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""CherryVoice · P2 关键验证：悬浮窗**不抢焦点**。
+"""EtherealFlow · P2 关键验证：悬浮窗**不抢焦点**。
 
 需求文档把它列为「最该先验证的」：悬浮窗一旦抢走前台焦点，
 后续文本注入就会打到错误的窗口。
@@ -80,12 +80,31 @@ def grab(rect: tuple[int, int, int, int], path: Path) -> bool:
 class FocusTest:
     def __init__(self, shot: Path | None) -> None:
         self.shot = shot
-        self.results: list[tuple[str, bool, str]] = []
+        self.results: list[tuple[str, str, str]] = []   # (名称, pass/fail/skip, 说明)
         self.overlay = Overlay(width=780)
         self.root = self.overlay.root
 
     def check(self, name: str, ok: bool, detail: str = "") -> None:
-        self.results.append((name, ok, detail))
+        self.results.append((name, "pass" if ok else "fail", detail))
+
+    def skip(self, name: str, detail: str = "") -> None:
+        """环境前提不成立时的结论：**既不算通过，也不算失败**。
+
+        与 ``test_hotkey.py`` 的处理保持一致。用它的规矩是：说明里必须写清楚
+        **哪条结论因此没有拿到阳性验证** —— 绝不能悄悄当成通过。
+        """
+        self.results.append((name, "skip", detail))
+
+    @staticmethod
+    def _wait_visible(hwnd: int, timeout: float = 4.0) -> float:
+        """等窗口真正被映射出来，返回等待的毫秒数；超时返回 -1。"""
+        start = time.monotonic()
+        while True:
+            if hwnd and w32.user32.IsWindowVisible(hwnd):
+                return (time.monotonic() - start) * 1000
+            if time.monotonic() - start >= timeout:
+                return -1.0
+            time.sleep(0.05)
 
     # ------------------------------------------------------------------ #
 
@@ -139,7 +158,13 @@ class FocusTest:
                        "顶层 exstyle=0x%08X" % self.overlay.exstyle)
             self.check("顶层窗口置顶", bool(self.overlay.exstyle & WS_EX_TOPMOST),
                        "顶层 exstyle=0x%08X" % self.overlay.exstyle)
-            self.check("悬浮窗可见", bool(w32.user32.IsWindowVisible(top or 0)))
+            # 不能只查一次 IsWindowVisible：show_listening() 内部只是 deiconify()，
+            # 真正的映射要等 Tk 事件循环跑起来，而主线程的 mainloop 与本工作线程
+            # 是并发的 —— 单次检查会随机失败（实测同一份代码时过时不过）。
+            waited = self._wait_visible(top or 0)
+            self.check("悬浮窗可见", waited >= 0,
+                       "IsWindowVisible=1，等待 %.0f ms" % waited if waited >= 0
+                       else "4 s 内始终 IsWindowVisible=0：窗口没有被映射出来")
 
             # 边灌文字边采样
             fg_stolen, focus_stolen = [], []
@@ -202,12 +227,28 @@ class FocusTest:
                 time.sleep(0.5)
                 fg2, _t2, focus2 = w32.foreground_focus_state()
                 detected = (fg2 != base[0]) or (focus2 != base[2])
-                self.check("阳性对照：检测器能发现真正的抢焦点行为", detected,
-                           "对照窗口=%s → 前台=%s 焦点=%s"
-                           % (describe(ctl_hwnd), describe(fg2), describe(focus2))
-                           if detected else
-                           "注意：本环境有前台锁，对照组也没能改变前台/焦点，"
-                           "因此上面的『未抢焦点』结论在本次运行中**未被阳性验证**")
+                if detected:
+                    self.check("阳性对照：检测器能发现真正的抢焦点行为", True,
+                               "对照窗口=%s → 前台=%s 焦点=%s"
+                               % (describe(ctl_hwnd), describe(fg2), describe(focus2)))
+                else:
+                    # 检测器分辨不出「悬浮窗真的没抢焦点」和「本环境谁都抢不到焦点」，
+                    # 所以这里**不能报 PASS**（结论是空的），也**不该报 FAIL**
+                    # （产品没做错，是环境把前提拿掉了）。按 test_hotkey 的规矩报 SKIP。
+                    n_pass = sum(1 for _n, s, _d in self.results if s == "pass")
+                    self.skip("阳性对照：检测器能发现真正的抢焦点行为",
+                              "本环境有前台锁（对照窗口 force_foreground 后前台仍是 %s），"
+                              "检测器观察不到焦点变化。\n"
+                              "        ⇒ 「悬浮窗不抢焦点」这条结论本次**没有被阳性验证**：\n"
+                              "          · 客观验证到的是**机制**：顶层窗口带 "
+                              "WS_EX_NOACTIVATE + WS_EX_TOOLWINDOW；\n"
+                              "          · 没验证到的是**效果**：上面 %d 条 PASS 只说明"
+                              "『采样期间前台/焦点没变』，\n"
+                              "            而在本环境下这是必然的（谁都抢不到焦点），"
+                              "所以它不构成证据。\n"
+                              "        ⇒ 请在正常桌面会话里跑一次 "
+                              "python tools\\test_overlay_focus.py 验收效果。"
+                              % (describe(fg2), n_pass))
                 self.overlay.post("call", holder["ctl"].destroy)
         except Exception as exc:  # noqa: BLE001
             self.check("执行过程中未抛异常", False, repr(exc))
@@ -222,18 +263,24 @@ class FocusTest:
         print("=" * 72, flush=True)
         print("P2 关键验证：悬浮窗不抢焦点", flush=True)
         print("=" * 72, flush=True)
-        allok = True
-        for name, ok, detail in self.results:
-            allok &= ok
-            print("%s %s" % ("[PASS]" if ok else "[FAIL]", name), flush=True)
+        tag = {"pass": "[PASS]", "fail": "[FAIL]", "skip": "[SKIP]"}
+        for name, state, detail in self.results:
+            print("%s %s" % (tag.get(state, "[FAIL]"), name), flush=True)
             if detail:
                 print("        %s" % detail, flush=True)
-        passed = sum(1 for _n, ok, _d in self.results if ok)
+        passed = sum(1 for _n, s, _d in self.results if s == "pass")
+        failed = sum(1 for _n, s, _d in self.results if s == "fail")
+        skipped = sum(1 for _n, s, _d in self.results if s == "skip")
         print("-" * 72, flush=True)
-        print("结论：%s（%d/%d 通过）"
-              % ("全部通过" if allok else "存在失败项", passed, len(self.results)),
-              flush=True)
-        return 0 if allok else 1
+        if failed:
+            verdict = "存在失败项"
+        elif skipped:
+            verdict = "通过（含 SKIP 项，见说明）"
+        else:
+            verdict = "全部通过"
+        print("结论：%s（通过 %d / 跳过 %d / 失败 %d，共 %d）"
+              % (verdict, passed, skipped, failed, len(self.results)), flush=True)
+        return 1 if failed else 0
 
 
 def main() -> int:

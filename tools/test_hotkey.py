@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""CherryVoice · 验证全局热键（FR-1）。
+"""EtherealFlow · 验证全局热键（FR-1）。
 
 分两部分，**分别如实报告**：
 

@@ -30,7 +30,7 @@ from client.asr import AsrClient                        # noqa: E402
 
 
 class FakeAsrServer:
-    """只会说 CherryVoice 协议的最小服务端。"""
+    """只会说 EtherealFlow 协议的最小服务端。"""
 
     def __init__(self) -> None:
         self.sessions = 0

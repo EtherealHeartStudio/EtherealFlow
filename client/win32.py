@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""CherryVoice · Windows 原生接口封装（只用 ctypes，零第三方依赖）。
+"""EtherealFlow · Windows 原生接口封装（只用 ctypes，零第三方依赖）。
 
 集中放置三块能力：
 
@@ -348,8 +348,8 @@ def known_folder(folder_id: str) -> Optional[str]:
     **为什么需要**：只认 ``%APPDATA%`` 环境变量的话，一旦变量没被设置
     （某些受限进程、服务、自动化环境里就是这样），路径会掉到
     ``~/.<app>``，于是**同一个程序在不同启动方式下会读写两份不同的配置** ——
-    实测踩到过：我这边写到 ``C:\\Users\\x\\.cherryvoice\\config.json``，
-    而用户正常双击运行时读的是 ``%APPDATA%\\CherryVoice\\config.json``。
+    实测踩到过：我这边写到 ``C:\\Users\\x\\.etherealflow\\config.json``，
+    而用户正常双击运行时读的是 ``%APPDATA%\\EtherealFlow\\config.json``。
     """
     try:
         ctypes.windll.shell32.SHGetKnownFolderPath.argtypes = [

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""CherryVoice · 设置界面（FR-7）。
+"""EtherealFlow · 设置界面（FR-7）。
 
 需求文档规定**只保留这六个分组**，一项都不多加：
 
@@ -40,7 +40,7 @@ class SettingsWindow:
         w32.enable_dpi_awareness()
 
         self.root = tk.Tk()
-        self.root.title("CherryVoice 设置")
+        self.root.title("EtherealFlow 设置")
         self.root.geometry("640x560")
         self.vars: dict[str, tk.Variable] = {}
         self._build()
@@ -261,7 +261,7 @@ class SettingsWindow:
         self.cfg = cfg
         if self.on_save:
             self.on_save(cfg)
-        messagebox.showinfo("已保存", "设置已保存到：\n%s\n\n重启 CherryVoice 后生效。" % path)
+        messagebox.showinfo("已保存", "设置已保存到：\n%s\n\n重启 EtherealFlow 后生效。" % path)
 
     def run(self) -> None:
         self.root.mainloop()

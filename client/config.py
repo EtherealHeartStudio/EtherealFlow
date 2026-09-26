@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-"""CherryVoice · 配置：默认值、加载、保存、路径解析。
+"""EtherealFlow · 配置：默认值、加载、保存、路径解析。
 
 配置**不放在仓库里**，而是放在用户的 AppData 下 —— 因为它可能含 API Key、
 个人热词、以及本机路径，这些都不该进版本库（需求文档 §11.3）。
 
-优先级：``--config 指定路径`` > ``%APPDATA%/CherryVoice/config.json`` > 内置默认值。
+优先级：``--config 指定路径`` > ``%APPDATA%/EtherealFlow/config.json`` > 内置默认值。
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import os
 from pathlib import Path
 from typing import Any, Optional
 
-APP_NAME = "CherryVoice"
+APP_NAME = "EtherealFlow"
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "hotkey": {"keys": ["ctrl", "win"], "backend": "polling", "swallow": True},
@@ -53,25 +53,53 @@ def deep_merge(base: dict, override: dict) -> dict:
     return out
 
 
-def default_config_dir() -> Path:
-    """配置目录。
+# 改过名。旧名字要留着做**配置迁移探测**，否则老用户升级后设置全丢
+# （麦克风选择、热词、LLM 地址……）。见 _migrate_legacy()。
+LEGACY_APP_NAMES = ("CherryVoice",)
+
+
+def _base_config_root() -> Path:
+    """配置根目录的父级。
 
     Windows 上先问系统要「漫游 AppData」的**真实路径**，而不是只看
     ``%APPDATA%`` 环境变量 —— 变量缺失时（受限进程/自动化环境）会掉到
-    ``~/.cherryvoice``，导致**同一个程序在不同启动方式下读写两份配置**。
+    ``~/.etherealflow``，导致**同一个程序在不同启动方式下读写两份配置**。
     """
     if os.name == "nt":
         try:
             from .win32 import roaming_appdata
             found = roaming_appdata()
             if found:
-                return Path(found) / APP_NAME
+                return Path(found)
         except Exception:  # noqa: BLE001
             pass
     base = os.environ.get("XDG_CONFIG_HOME")
     if base:
-        return Path(base) / APP_NAME
+        return Path(base)
     return Path.home() / (".config" if os.name != "nt" else "." + APP_NAME.lower())
+
+
+def _migrate_legacy(target: Path) -> None:
+    """把老名字的配置目录整体搬到新名字下（只在目标不存在时搬一次）。"""
+    if target.exists():
+        return
+    for old in LEGACY_APP_NAMES:
+        old_dir = target.parent / old
+        if not old_dir.exists():
+            continue
+        try:
+            import shutil
+            shutil.move(str(old_dir), str(target))
+            print("已把配置目录从 %s 迁移到 %s" % (old_dir, target))
+        except OSError:
+            pass          # 迁移失败不该让程序起不来，大不了用默认值
+        return
+
+
+def default_config_dir() -> Path:
+    target = _base_config_root() / APP_NAME
+    _migrate_legacy(target)
+    return target
 
 
 def default_config_path() -> Path:

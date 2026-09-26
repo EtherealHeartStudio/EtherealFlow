@@ -1,5 +1,5 @@
 #!/bin/bash
-# CherryVoice · WSL 流式识别服务启动器
+# EtherealFlow · WSL 流式识别服务启动器
 #
 # 由 systemd 用户服务（scripts/r2t2-stream.service）或手动调用。
 # 关键点：venv 里装了 cudart/cublas，而 WSL 只有驱动层 libcuda.so，
@@ -7,7 +7,7 @@
 set -euo pipefail
 
 VENV="${R2T2_VENV:-/home/r2t2/Confucius4-R2T2/.venv}"
-APP_DIR="${R2T2_APP_DIR:-/home/r2t2/cherryvoice}"
+APP_DIR="${R2T2_APP_DIR:-/home/r2t2/etherealflow}"
 
 export LD_LIBRARY_PATH="$VENV/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:$VENV/lib/python3.12/site-packages/nvidia/cublas/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export GGUF_DIR="${GGUF_DIR:-/home/r2t2/models}"

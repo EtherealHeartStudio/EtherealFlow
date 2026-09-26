@@ -42,10 +42,10 @@ jobs:
         run: python scripts/build_exe.py
 
       - name: 产物自检
-        run: dist\CherryVoice\CherryVoice.exe --list-devices
+        run: dist\EtherealFlow\EtherealFlow.exe --list-devices
 
       - uses: actions/upload-artifact@v4
         with:
-          name: CherryVoice-windows-x64
-          path: build/dist/CherryVoice/
+          name: EtherealFlow-windows-x64
+          path: build/dist/EtherealFlow/
           if-no-files-found: error

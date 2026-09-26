@@ -1,9 +1,9 @@
 #!/bin/bash
-# CherryVoice · 把 WSL 流式识别服务部署到本机 r2t2 账号下。
+# EtherealFlow · 把 WSL 流式识别服务部署到本机 r2t2 账号下。
 #
-# 在 Windows 上这样调用（不修改任何现有文件，只新增 /home/r2t2/cherryvoice）：
+# 在 Windows 上这样调用（不修改任何现有文件，只新增 /home/r2t2/etherealflow）：
 #
-#   wsl.exe -d Ubuntu -u r2t2 -- bash -l "/mnt/d/<...>/CherryVoice/scripts/deploy_wsl.sh"
+#   wsl.exe -d Ubuntu -u r2t2 -- bash -l "/mnt/d/<...>/EtherealFlow/scripts/deploy_wsl.sh"
 #
 # 参数：
 #   --install-service   额外安装 systemd 用户服务（开机自启需要先 enable-linger）
@@ -11,7 +11,7 @@
 set -euo pipefail
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TARGET="${R2T2_APP_DIR:-/home/r2t2/cherryvoice}"
+TARGET="${R2T2_APP_DIR:-/home/r2t2/etherealflow}"
 UNIT_DIR="$HOME/.config/systemd/user"
 UNIT_NAME="r2t2-stream.service"
 

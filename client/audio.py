@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""CherryVoice · 麦克风采集：16 kHz / 单声道 / int16，按固定块长回调。
+"""EtherealFlow · 麦克风采集：16 kHz / 单声道 / int16，按固定块长回调。
 
 需求文档 FR-2：16000 Hz、单声道、16-bit PCM、每 160 ms 一块。
 

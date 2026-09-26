@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""CherryVoice · 一键发布到 GitHub。
+"""EtherealFlow · 一键发布到 GitHub。
 
 用法::
 
@@ -67,7 +67,7 @@ def main() -> int:
         print("找不到 git。")
         return 2
     if "/" not in args.repo or args.repo.count("/") != 1:
-        print("--repo 格式应为 用户名/仓库名，例如 octocat/CherryVoice")
+        print("--repo 格式应为 用户名/仓库名，例如 octocat/EtherealFlow")
         return 2
 
     # ---- 1) 发布前安全检查 ---- #
@@ -140,12 +140,12 @@ def main() -> int:
         print("     （未加 --create，跳过。也可手动在 GitHub 上建 Release）")
     elif not gh:
         print("     本机没装 gh CLI，跳过。可在 GitHub 网页上手动建 Release，"
-              "把 build/dist/CherryVoice/ 打包上传。")
+              "把 build/dist/EtherealFlow/ 打包上传。")
     else:
         notes = ROOT / args.notes
         note_args = ["--notes-file", str(notes)] if notes.exists() else ["--generate-notes"]
         tag = tags[-1] if tags else args.branch
-        created = run(gh, "release", "create", tag, "--title", "CherryVoice %s" % tag,
+        created = run(gh, "release", "create", tag, "--title", "EtherealFlow %s" % tag,
                       *note_args)
         sys.stdout.write(created.stdout)
         sys.stderr.write(created.stderr)
@@ -154,7 +154,7 @@ def main() -> int:
 
     print("\n%s" % ("=" * 70))
     print("发布完成：https://github.com/%s" % args.repo)
-    print("可执行文件在 build/dist/CherryVoice/，可打包后作为 Release 附件上传。")
+    print("可执行文件在 build/dist/EtherealFlow/，可打包后作为 Release 附件上传。")
     print("=" * 70)
     return 0
 

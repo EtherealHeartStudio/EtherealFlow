@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""CherryVoice · WSL 流式识别服务（WebSocket）。
+"""EtherealFlow · WSL 流式识别服务（WebSocket）。
 
 把官方 Confucius4-R2T2 的 llama.cpp 流式后端（``R2T2LlamaASRModel.LlamaNative``）
 包装成一个常驻 WebSocket 服务，为 Windows 端语音输入法客户端提供**累积**识别文本。
@@ -86,10 +86,10 @@ MAX_MESSAGE_BYTES = int(os.environ.get("R2T2_MAX_MESSAGE_BYTES",
 DEFAULT_LANGUAGE = os.environ.get("R2T2_LANGUAGE") or None
 DEFAULT_CONTEXT = os.environ.get("R2T2_CONTEXT", "")
 
-LOG_DIR = Path(os.environ.get("R2T2_LOG_DIR", "/home/r2t2/cherryvoice/logs"))
+LOG_DIR = Path(os.environ.get("R2T2_LOG_DIR", "/home/r2t2/etherealflow/logs"))
 NATIVE_LOG_MAX_BYTES = 8 * 1024 * 1024
 
-log = logging.getLogger("cherryvoice.stream")
+log = logging.getLogger("etherealflow.stream")
 
 
 # --------------------------------------------------------------------------- #
@@ -429,7 +429,7 @@ async def _amain(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="CherryVoice WSL 流式识别服务")
+    parser = argparse.ArgumentParser(description="EtherealFlow WSL 流式识别服务")
     parser.add_argument("--selftest-wav", metavar="WAV",
                         help="不启服务，直接对一份 WAV 跑流式自检")
     parser.add_argument("--log-level", default=os.environ.get("R2T2_LOG_LEVEL", "INFO"))
@@ -438,7 +438,7 @@ def main() -> int:
     _setup_logging(args.log_level)
     _redirect_native_logs()
     log.info("=" * 60)
-    log.info("CherryVoice 流式识别服务启动 | pid=%d", os.getpid())
+    log.info("EtherealFlow 流式识别服务启动 | pid=%d", os.getpid())
     try:
         return asyncio.run(_amain(args))
     except KeyboardInterrupt:  # pragma: no cover

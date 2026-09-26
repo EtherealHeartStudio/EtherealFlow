@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""CherryVoice · 设置界面的配置往返测试（FR-7）。
+"""EtherealFlow · 设置界面的配置往返测试（FR-7）。
 
 不需要人点界面：构建窗口 → 填一套配置 → ``collect()`` 读回 → 存盘 → 重新加载，
 断言"存进去的和读出来的一致"。顺手把界面截个图，供人眼检查。
@@ -51,7 +51,7 @@ def main() -> int:
     want["inject"]["mode"] = "typing"
     want["inject"]["restore_clipboard"] = False
     want["inject"]["preserve_nontext_clipboard"] = False
-    want["hotwords"] = ["CherryVoice", "Confucius4", "网易有道"]
+    want["hotwords"] = ["EtherealFlow", "Confucius4", "网易有道"]
 
     win = SettingsWindow(load_config(None), tmp)
     win.apply(want)

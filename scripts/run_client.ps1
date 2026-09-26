@@ -1,4 +1,4 @@
-# CherryVoice 启动器（被「启动 CherryVoice.bat」调用，也可以直接右键用 PowerShell 运行）
+# EtherealFlow 启动器（被「启动 EtherealFlow.bat」调用，也可以直接右键用 PowerShell 运行）
 #
 # 为什么逻辑放在 .ps1 而不是 .bat：cmd 按系统 ANSI 代码页（中文 Windows 是 GBK）
 # 解析 .bat，而文件是 UTF-8 —— 中文注释会把整行读断，命令直接失效（实测踩到）。
@@ -24,7 +24,7 @@ if (-not (Test-Path $pythonw)) {
     exit 1
 }
 
-$cfgDir = Join-Path $env:APPDATA 'CherryVoice'
+$cfgDir = Join-Path $env:APPDATA 'EtherealFlow'
 $log = Join-Path $cfgDir 'logs\client.log'
 
 # 判重：日志最后一条「热键就绪」之后，进程是否还有心跳（配置里没有心跳，
@@ -35,8 +35,8 @@ if (Get-AppProcesses) {
         $age = (New-TimeSpan -Start (Get-Item $log).LastWriteTime -End (Get-Date)).TotalMinutes
         $fresh = $age -lt 240
     }
-    Write-Host 'CherryVoice 看起来已经在运行了。' -ForegroundColor Yellow
-    Write-Host "  如果按 Ctrl+Win 没反应，先双击「停止 CherryVoice.bat」再启动一次。"
+    Write-Host 'EtherealFlow 看起来已经在运行了。' -ForegroundColor Yellow
+    Write-Host "  如果按 Ctrl+Win 没反应，先双击「停止 EtherealFlow.bat」再启动一次。"
     Read-Host '按回车退出'
     exit 0
 }
@@ -45,12 +45,12 @@ Start-Process -FilePath $pythonw -ArgumentList '-m', 'client.app' -WorkingDirect
 Start-Sleep -Seconds 5
 
 Write-Host ''
-Write-Host 'CherryVoice 已启动。' -ForegroundColor Green
+Write-Host 'EtherealFlow 已启动。' -ForegroundColor Green
 Write-Host '  用法：在任意输入框里，按住 Ctrl + Win 说话，说完松开两个键。'
 Write-Host '  （Win 键 = 键盘左下角那个 Windows 徽标键，在 Ctrl 和 Alt 中间）'
 Write-Host ''
 Write-Host "  日志：$log"
-Write-Host '  停止：双击「停止 CherryVoice.bat」'
+Write-Host '  停止：双击「停止 EtherealFlow.bat」'
 Write-Host ''
 Write-Host '  如果什么都没发生，把日志最后几行发给我，我来看是哪一步卡住。'
 Read-Host '按回车关闭本窗口'

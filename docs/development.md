@@ -1,4 +1,4 @@
-# CherryVoice 开发指南
+# EtherealFlow 开发指南
 
 ## 1. 环境准备
 
@@ -28,7 +28,7 @@ wsl.exe -d Ubuntu -u <user> -- bash -l "/mnt/d/<仓库路径>/scripts/deploy_wsl
 ```
 
 服务文件在 `~/.config/systemd/user/r2t2-stream.service`，
-日志在 `~/cherryvoice/logs/`（`service.log` 是我们自己的，`native.log` 是 llama.cpp 的）。
+日志在 `~/etherealflow/logs/`（`service.log` 是我们自己的，`native.log` 是 llama.cpp 的）。
 开机自启还需要一次性 `sudo loginctl enable-linger <user>`。
 
 ## 2. 目录结构
@@ -119,10 +119,10 @@ python -m client.app --settings
 python wsl/r2t2_stream_server.py --selftest-wav /path/test.wav
 ```
 
-* 客户端日志：`%APPDATA%\CherryVoice\logs\client.log`
-* 服务日志：`~/cherryvoice/logs/service.log`；llama.cpp 噪音在 `native.log`
+* 客户端日志：`%APPDATA%\EtherealFlow\logs\client.log`
+* 服务日志：`~/etherealflow/logs/service.log`；llama.cpp 噪音在 `native.log`
 * 想看 llama.cpp 原生日志（排查模型问题）：启动服务前设 `R2T2_STREAM_NATIVE_LOG=1`
-* 配置文件：`%APPDATA%\CherryVoice\config.json`，**只写与默认值不同的键**
+* 配置文件：`%APPDATA%\EtherealFlow\config.json`，**只写与默认值不同的键**
 
 ## 5. 改代码时要留意的地方
 

@@ -1,4 +1,4 @@
-# CherryVoice v1.0.0
+# EtherealFlow v0.1.0
 
 Windows 桌面**流式语音输入法**：按住热键说话，屏幕上实时看着字长出来；松开后由大模型整段修正（或翻译），再把干净的文本注入当前输入框。
 
@@ -28,15 +28,15 @@ Windows 桌面**流式语音输入法**：按住热键说话，屏幕上实时�
 
 - **首字延迟约 1.2 s**，其中约 1.1 s 是模型本身需要攒够音频才吐第一个字，不是管线开销。
 - **单段超过约 45 秒会跟不上实时**（流式解码每块都要重编码累积音频）。客户端默认 30 秒自动分段重建会话规避，代价是段间可能有轻微接缝。
-- **打包版没有控制台窗口**，日志写在 `%APPDATA%\CherryVoice\logs\client.log`。
+- **打包版没有控制台窗口**，日志写在 `%APPDATA%\EtherealFlow\logs\client.log`。
 - **需要自备两样东西**：WSL 里的 Confucius4-R2T2 识别服务，以及一个 OpenAI 兼容的 LLM 接口。两者都没有内置，README 说明了获取与配置方式。
 - 词库只做**热词提示**（作为 context 传给识别引擎 + 供 LLM 纠错参考），不做拼音层面的强制替换。
 
 ## 安装
 
 1. 在 WSL 里按 `docs/development.md` 部署识别服务（模型权重需自行获取）。
-2. 下载本 Release 的 `CherryVoice-windows-x64.zip`，解压后运行 `CherryVoice.exe`。
-3. 首次运行建议先 `CherryVoice.exe --settings` 配置热键、识别服务地址与 LLM 接口。
+2. 下载本 Release 的 `EtherealFlow-windows-x64-v0.1.0.zip`，解压后运行 `EtherealFlow.exe`。
+3. 首次运行建议先 `EtherealFlow.exe --settings` 配置热键、识别服务地址与 LLM 接口。
 
 ## 许可
 
@@ -48,5 +48,6 @@ Windows 桌面**流式语音输入法**：按住热键说话，屏幕上实时�
 
 ## 自测
 
-仓库自带 11 个无需人按键 / 无需说话 / 无需 API Key 的自测工具，见 README 的「自测」一节。
-提交前请跑 `python tools/check_release.py`（退出码非 0 即不许发布）。
+仓库自带 10 项自测（`python tools\run_all_tests.py`），其中 7 项属于快速模式：
+不需要真人按键、不需要对着麦克风说话、也不需要 API Key。
+提交前请跑 `python tools\check_release.py`（退出码非 0 即不许发布）。

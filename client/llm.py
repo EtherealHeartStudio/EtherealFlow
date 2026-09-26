@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""CherryVoice · LLM 修正 / 翻译（FR-4 / FR-5 的后端部分）。
+"""EtherealFlow · LLM 修正 / 翻译（FR-4 / FR-5 的后端部分）。
 
 OpenAI 兼容 ``/v1/chat/completions``，只用标准库（``urllib``），零第三方依赖。
 

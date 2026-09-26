@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""CherryVoice · 验证文本注入（FR-6）。
+"""EtherealFlow · 验证文本注入（FR-6）。
 
 目标窗口用**进程内的 Tk 文本框**：它是真实的可粘贴控件，而且内容能直接读回来，
 所以"文本到底有没有进去"是可判定的，不靠肉眼。
@@ -31,8 +31,8 @@ from client import win32 as w32                    # noqa: E402
 from client.inject import (Injector, clipboard_get_text, clipboard_set_text,  # noqa: E402
                            clipboard_snapshot)
 
-ORIGINAL = "CherryVoice-原剪贴板内容-ORIGINAL-12345"
-INJECTED = "CherryVoice 注入测试：hello 123，结束。"
+ORIGINAL = "EtherealFlow-原剪贴板内容-ORIGINAL-12345"
+INJECTED = "EtherealFlow 注入测试：hello 123，结束。"
 SECOND = "用户后来自己复制的内容-SECOND"
 
 
@@ -42,7 +42,7 @@ class Target:
     def __init__(self) -> None:
         self.root = tk.Tk()
         w32.enable_dpi_awareness()
-        self.root.title("CherryVoice 注入目标")
+        self.root.title("EtherealFlow 注入目标")
         self.root.geometry("640x220+160+160")
         self.text = tk.Text(self.root, font=("Microsoft YaHei UI", 13), undo=True)
         self.text.pack(fill="both", expand=True)

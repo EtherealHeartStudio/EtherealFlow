@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""CherryVoice · 主程序（P2：热键 + 麦克风 + 不抢焦点悬浮窗）。
+"""EtherealFlow · 主程序（P2：热键 + 麦克风 + 不抢焦点悬浮窗）。
 
 正常用法::
 
@@ -345,7 +345,7 @@ class App:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="CherryVoice Windows 客户端")
+    parser = argparse.ArgumentParser(description="EtherealFlow Windows 客户端")
     parser.add_argument("--config", default="", help="JSON 配置文件路径")
     parser.add_argument("--settings", action="store_true", help="打开设置界面后退出")
     parser.add_argument("--replay", default="", help="回放一份 WAV 走完整链路（自测用）")
@@ -365,7 +365,7 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.list_devices:
-        emit("CherryVoice 可用输入设备：")
+        emit("EtherealFlow 可用输入设备：")
         for idx, name in list_input_devices():
             emit("%3d  %s" % (idx, name))
         return 0

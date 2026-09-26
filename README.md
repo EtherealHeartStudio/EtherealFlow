@@ -1,239 +1,300 @@
-# CherryVoice
+# EtherealFlow · 缥缈心流
 
-一个 **Windows 桌面流式语音输入法**：按住热键说话，屏幕上**实时看着字长出来**；说完后由大模型**整段修正**，最后把干净的文本**一次性注入当前输入框**。
+**真流式语音输入法** · 本地模型 · 语音不出你的机器
 
-> 开发状态：**P1 完成**（WSL 流式识别服务已跑通并实测）。P2~P5 进行中，见 [开发计划](#开发计划)。
+> 按住热键说话，屏幕上**实时看着字长出来**；松开后把干净的文本注入当前输入框。
+> 识别模型跑在**你自己的机器上**，语音不经过任何云端。
 
-## 它和别的语音输入有什么不一样
+![真流式输入效果](docs/assets/streaming-demo.gif)
 
-| 能力 | 现有开源工具 | CherryVoice |
+`Windows 10/11` · `WSL2` · `Python` · `MIT`
+
+---
+
+# 中文
+
+## 一、为什么叫「真流式」
+
+市面上多数语音输入是**说完才出字**：你要按住说完整段、松开、再等一两秒，屏幕才一次性跳出结果。
+说错了只能重来 —— 因为你看不到过程。
+
+EtherealFlow 是**边说边出**：
+
+| | 传统语音输入 | EtherealFlow |
 |---|---|---|
-| 流式显示（边说边出字） | 极少，且多为 macOS 独占 | ✅ |
-| AI 修正（说完整段重写） | 多数有 | ✅ |
-| **流式翻译**（原文/译文同时滚动） | 几乎没有 | ✅ |
-| 接入**自研/私有 ASR** | 几乎都写死服务商 | ✅ 对接 Confucius4-R2T2 |
-| Windows | 支持少 | ✅ Windows 10/11 |
+| 出字时机 | 松手后一次性出现 | **说话过程中逐字增长** |
+| 能否中途察觉说错 | ❌ | ✅ 看到字就知道它在听、听对没有 |
+| 后端协议 | 整段请求 | **累积文本流**（`partial` 持续推送） |
+| 松手后 | 直接注入 | 修正/翻译后再注入 |
 
-## 架构：为什么必须两段式
+它的识别后端（Confucius4-R2T2）本身是 **append-only 的真流式模型**：已输出的文字永不回改，
+所以悬浮窗里看到的字是稳定增长的，不会来回跳。这正是"**真**流式"与"分段伪流式"的区别。
 
-```
-┌──────────── Windows 客户端（本项目主体）────────────┐
-│  全局热键 ─→ 麦克风采集 ─→ WebSocket 发 16k PCM 块    │
-│                              ↓                      │
-│  悬浮窗 ←── 增量文本 ─────────┘                      │
-│  松开热键 → LLM 修正/翻译 → 注入当前输入框            │
-└───────────────────────┬─────────────────────────────┘
-                        │ ws://127.0.0.1:18300
-┌───────────────────────▼─────────────────────────────┐
-│  WSL 识别服务：R2T2LlamaASRModel.LlamaNative + CUDA  │
-└─────────────────────────────────────────────────────┘
-```
+### 名字的来历
 
-* 识别模型跑在 WSL（Linux + CUDA），Windows 客户端无法直接调用；
-* 麦克风、全局热键、不抢焦点悬浮窗、文本注入，WSL 又做不到；
-* WSL2 支持 **localhost 转发**：WSL 内监听 `0.0.0.0:18300`，Windows 直接访问 `127.0.0.1:18300`（已实测，握手 ~17 ms）。
+**EtherealFlow = 缥缈心流**。
 
-## 快速开始
+中文的「**流**」一个字同时装了两层意思：
 
-### 0. 前置条件
+- 「心**流**」—— 心理学上的 **flow**，沉浸忘我、思路不断的状态
+- 「**流**式」—— 边说边出字的技术特征
 
-* Windows 10/11 + WSL2（Ubuntu），识别模型已按 `docs/` 的说明部署在 WSL 的专用账号下
-* 一个 OpenAI 兼容的 LLM 接口（用于修正/翻译；**不可用时自动降级为注入原文**）
+而 `Ethereal`（缥缈）= 缥缈心。
 
-### 1. 部署 WSL 流式识别服务
+## 二、本地模型：语音不出你的机器
 
-```bash
-# 在 Windows 上执行（只新增 /home/<user>/cherryvoice，不改动任何现有文件）
-wsl.exe -d Ubuntu -u r2t2 -- bash -l "/mnt/d/<仓库路径>/scripts/deploy_wsl.sh" --install-service --restart
-```
-
-服务默认监听 `0.0.0.0:18300`，日志在 `/home/r2t2/cherryvoice/logs/`。
-
-### 2. 验收 / 自测
-
-```bash
-# 零依赖客户端，Windows 与 WSL 都能跑
-python tools/test_stream_client.py --wav some16k.wav --url ws://127.0.0.1:18300
-```
-
-也可让服务端脱离网络自检：
-
-```bash
-python wsl/r2t2_stream_server.py --selftest-wav /path/to/test.wav
-```
-
-## 目录结构
+这是本项目与绝大多数语音输入工具最根本的区别。
 
 ```
-├── wsl/          WSL 流式识别服务（WebSocket）
-├── client/       Windows 客户端（热键 / 采集 / 悬浮窗 / 识别客户端；P3 起含注入与 LLM）
-├── tools/        诊断与验收工具（零第三方依赖，见「自测」）
-├── scripts/      部署脚本与 systemd 用户服务
-├── docs/         架构说明、协议、开发指南、竞品调研
-└── resources/    测试音频等（不提交模型权重）
+┌──────────── 你的 Windows 电脑 ────────────┐
+│                                           │
+│   麦克风 → 客户端 ──┐                      │
+│                    │ ws://127.0.0.1:18300 │
+│   悬浮窗 ←─────────┘                      │
+│                    ↓                      │
+│         WSL2 里的识别服务                  │
+│         Confucius4-R2T2（llama.cpp + CUDA）│
+│         模型权重常驻显存，约 2.5 GB          │
+│                                           │
+└───────────────────────────────────────────┘
+        全程不联网 · 不经过任何云端服务
 ```
 
-## 两个踩过的 Windows 坑
+- **语音数据不出本机**：音频只发到 `127.0.0.1:18300`，即你这台机器上的 WSL 实例。
+- **识别不需要 API Key、不需要按量计费**：模型权重在本地，说多少句都一样。
+- **可换成你自己的 ASR**：客户端只认一个 WebSocket 协议（见 [docs/protocol.md](docs/protocol.md)），
+  想接自研/私有的识别引擎，改服务端即可。
+- 唯一的例外是**可选的**大模型修正/翻译 —— 那一步会调用你配置的 LLM 接口（默认关闭）。
 
-1. **`WS_EX_NOACTIVATE` 必须加在顶层窗口上**。tkinter 的 `winfo_id()` 返回的是
-   `TkChild` 子窗口，真正会被激活的是它的父级 `TkTopLevel`。加错了地方等于没加，
-   悬浮窗照样抢焦点、照样把文本注入到错误的窗口。`client/win32.py` 的
-   `top_level_window()` 负责这件事。
-2. **DPI 感知要在建窗前设**。否则缩放显示器上既模糊、坐标又是错的。
+> ⚠️ **模型权重需自行获取**：本仓库不分发权重（GB 级）。
+> 识别引擎为 [Confucius4-R2T2](https://github.com/netease-youdao/Confucius4-R2T2)（网易有道），
+> 代码 Apache-2.0、**权重按 NetEase Model Use License**（与代码许可不同，商用请自行确认）。
+> 部署步骤见 [docs/development.md](docs/development.md)。
 
-## 协议
+## 三、功能
 
-见 [docs/protocol.md](docs/protocol.md)（与需求文档 §7.1 一致）。要点：
-
-* 客户端 → 服务端：二进制帧（16 kHz / 单声道 / int16 LE PCM，建议 160 ms）、
-  `{"type":"start",...}`、`{"type":"finish"}`、`{"type":"cancel"}`
-* 服务端 → 客户端：`{"type":"partial","text":"累积全文"}`、
-  `{"type":"final","text":"..."}`、`{"type":"error","message":"..."}`
-
-`partial` 是**累积全文**（不是增量），客户端直接替换显示即可，后端偶发回滚天然被覆盖。
-
-## 开发计划
-
-| 阶段 | 交付物 | 状态 |
-|---|---|---|
-| P1 | WSL 流式 WebSocket 识别服务 | ✅ 已完成并双侧实测 |
-| P2 | Windows 客户端骨架：热键 + 麦克风 + 不抢焦点悬浮窗 | ✅ 已完成（机械可验部分全过；真人按键+说话验收待做） |
-| P3 | LLM 修正 + 文本注入（完整闭环） | 🟡 代码完成，自测通过；真机 LLM 连通待 API Key |
-| P4 | 流式双语翻译 | 🟡 代码完成，自测 15/15 + 集成 5/5；真机 LLM 连通待 API Key |
-| P5 | 设置界面 + 打包 + 文档 + 发布 | 🟡 代码与文档全部完成；**仅差 GitHub 发布（待仓库名）** |
-
-### 流式翻译怎么做的（竞品都没有现成实现）
-
-原文按**句子边界**切成「已落定段」和「开口段」。已落定段**永不重译** ——
-只有遇到句末标点、静默 ~1.5 秒、或缓冲超过 N 字，才把新内容送去翻译，
-译文因此是**纯追加**的，不会边翻边抖。后端若回退了已落定的文字，
-就丢掉受影响的尾部段重译，而不是硬拼。
-
-> 注意：**逗号不算句子边界**。按逗号切会把语义切碎，译文读起来很跳。
-
-## 自测（都不需要人按键 / 不需要人说话）
-
-```bash
-# 一键跑完所有离线自测（推荐；CI 也是跑这个）
-python tools\run_all_tests.py
-python tools\run_all_tests.py --fast          # 跳过较慢的界面/回放类
-python tools\run_all_tests.py --only llm      # 只跑名字含关键词的
-
-# 也可以单独跑：
-python tools\test_win32_signatures.py         # Win32 ctypes 签名审计（防 64 位截断）
-python tools\test_overlay_focus.py --shot overlay.png   # 悬浮窗不抢焦点（含阳性对照）
-python tools\test_mic_path.py --wav a.wav     # 真实音频链路（虚拟声卡回环）
-python tools\test_hotkey.py                   # 热键：轮询逻辑 + 钩子状态机
-python tools\test_injection.py                # 注入：剪贴板规则 + Ctrl+V / 键入
-python tools\test_llm.py                      # LLM 失败分类与输出校验（假服务）
-python tools\test_translator.py               # 增量翻译：三种触发 + 只翻新增
-python tools\test_translate_flow.py a.wav     # 翻译接到主流程
-python tools\test_closed_loop.py a.wav        # 完整闭环（假 LLM）
-python tools\test_settings.py                 # 设置界面配置往返（含截图）
-python tools\test_stream_client.py --wav a.wav  # 识别服务验收（零依赖）
-python tools\probe_key_injection.py           # 探测合成按键能否驱动热键
-python tools\check_release.py                 # 发布前安全检查
-```
-
-> `tools\check_release.py` 退出码非 0 就**不许发布**。它自己也被验证过：
-> 仓库干净时报"可以发布"，故意塞一个假 Key 进去会被抓成 BLOCKER。
-> 若某一行确实需要豁免（比如测试里的假数据），在该行加注释
-> `release-check: allow` 即可。
-
-正常使用：`python -m client.app`（按住热键说话，松开后出结果）。
-设置界面：`python -m client.app --settings`。
-
-## 打包成免安装 exe
-
-```bash
-.venv\Scripts\python.exe scripts\build_exe.py              # 目录版（默认，启动快）
-.venv\Scripts\python.exe scripts\build_exe.py --onefile    # 单文件版
-.venv\Scripts\python.exe scripts\build_exe.py --console    # 保留控制台，排查用
-```
-
-产物在 `build/dist/CherryVoice/`（约 58 MB，**自带 Python 与 PortAudio，目标机器不需要装任何东西**）。
-推 tag（`v*`）时 GitHub Actions 会自动跑同样的流程并把产物传成 artifact，见
-`.github/workflows/build.yml`。
-
-> 打包版**没有控制台窗口**（它是输入法，不该常驻黑框）。所以运行日志同时写在
-> `%APPDATA%\CherryVoice\logs\client.log`，出问题看那个文件。
-
-## 依赖的外部服务与许可
-
-* **ASR 模型**：Confucius4-R2T2（网易有道）——代码 Apache-2.0，**权重按 NetEase Model Use License**（与代码许可不同，商用请注意）。权重不随本仓库分发。
-* 本项目**不安装真 vLLM**：仓库的 `r2t2/r2t2_asr.py` 有 import 顺序 bug，已在 venv 中放置替身（见需求文档 §6.2②）。
-* License：见 [LICENSE](LICENSE)。
-
-## 已实测的性能基线（本机 RTX 4070 Laptop / WSL2）
-
-| 项 | 实测值 |
+| 功能 | 状态 |
 |---|---|
-| 模型加载 | 4.3 s（首次冷启动 8.3 s） |
-| 6.74 s 音频流式解码 | ~3.8 s（0.56× 实时），首字 **1.20 s** |
-| 20.22 s 音频流式解码 | 14.5 s（0.72× 实时） |
-| 33.70 s 音频流式解码 | 29.6 s（0.88× 实时） |
-| **53.92 s 音频流式解码** | **62.2 s（1.15× 实时 —— 跟不上说话了）** |
-| 分段后（每段 8 s，同一份 33.7 s 音频） | **0.54× 实时，单块最慢从 288 ms 降到 162 ms** |
+| 全局热键按住说话 / 松开结束 / Esc 取消 | ✅ |
+| 16 kHz 单声道采集（设备不支持时自动重采样） | ✅ |
+| **流式识别显示**（逐字增长、不抢焦点悬浮窗） | ✅ |
+| 文本注入（剪贴板+Ctrl+V 主方案 / 逐字键入兜底 / 剪贴板保护） | ✅ |
+| 长语音自动分段（避免长音频解码跟不上实时） | ✅ |
+| 断线自动重连 / 服务崩溃自动恢复 | ✅ |
+| 设置界面（热键 / 识别 / 修正 / 翻译 / 注入 / 词典） | ✅ |
+| LLM 整段修正 | 🟡 引擎完成，待接真实模型验证 |
+| 流式双语翻译（原文/译文并行、只翻译新增部分） | 🟡 引擎完成，待接真实模型验证 |
+
+## 四、实测性能（RTX 4070 Laptop / WSL2）
+
+| 项 | 实测 |
+|---|---|
+| 模型加载 | 4.3 s |
+| 6.74 s 语音流式解码 | 0.56× 实时，首字 **1.20 s** |
+| 33.70 s 语音流式解码 | 0.88× 实时 |
+| 53.92 s 语音流式解码 | **1.15× 实时（跟不上）** → 故客户端 30 秒自动分段 |
+| 分段后（每段 8 s，同一份 33.7 s 音频） | **0.54× 实时** |
 | Windows → WSL 握手 | 17 ms |
-| 显存占用 | ~2.5 GB |
+| 打包体积 | 58 MB（自带 Python，免安装） |
 
-> 长语音会明显变慢（流式解码每块都要重编码累积音频）。客户端默认在
-> **连续说话 30 秒**时自动分段重建会话，对用户无感。详见
-> [docs/protocol.md](docs/protocol.md)。
+> 首字 ~1.2 s 里约 1.1 s 是**模型本身需要攒够音频才吐第一个字**，不是管线开销。
+> 长语音会明显变慢（流式解码每块都要重编码累积音频），所以客户端默认连续说 30 秒就自动分段重建会话，对用户无感。
 
-### 长时间运行（需求文档 风险 #7）
+## 五、快速开始
 
-连续跑 20 轮识别（每轮 6.74 s 音频）实测：
+### 1. 部署 WSL 识别服务
 
-| 指标 | 表现 |
+```bash
+# 在 Windows 上执行（只新增 ~/etherealflow，不改动任何现有文件）
+wsl.exe -d Ubuntu -u <用户> -- bash -l "/mnt/d/<仓库路径>/scripts/deploy_wsl.sh" --install-service --restart
+```
+
+### 2. 运行客户端
+
+```bash
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install numpy sounddevice websockets
+.venv\Scripts\python.exe -m client.app            # 或双击「启动 EtherealFlow.bat」
+```
+
+### 3. 用法
+
+在任意输入框里，**按住 `Ctrl + Win`** 说话，**松开**即输入。
+录音中按 `Esc` 取消本次输入。
+
+> **第一次用没反应？** 检查麦克风选择 —— 配置里 `audio.device` 需指向**真实麦克风**
+> （很多机器默认录音设备是虚拟声卡）。用 `--list-devices` 看编号，再到设置界面里选。
+
+设置界面：`python -m client.app --settings`
+
+### 4. 自测（不需要人按键、不需要说话、不需要 API Key）
+
+```bash
+python tools\run_all_tests.py        # 一键跑完 10 个测试
+python tools\check_release.py        # 发布前安全检查
+```
+
+## 六、架构
+
+```
+Windows 客户端                     WSL 识别服务
+├── hotkey.py    全局热键          r2t2_stream_server.py
+├── audio.py     16k 采集           └─ R2T2 llama.cpp 流式后端
+├── asr.py       WS 客户端 + 重连        （模型常驻显存 ~2.5 GB）
+├── overlay.py   不抢焦点悬浮窗
+├── llm.py       LLM 修正/翻译
+├── translator.py 增量流式翻译
+├── inject.py    文本注入
+├── settings_ui.py 设置界面
+└── app.py       主程序
+```
+
+**为什么必须两段式**：识别模型是 Linux + CUDA 的编译产物，Windows 调不动；
+而热键/麦克风/悬浮窗/注入又是 Windows 独有的能力。两边靠 WSL2 的 localhost 转发连接。
+细节见 [docs/architecture.md](docs/architecture.md)。
+
+## 七、后期开发计划
+
+### v0.2 —— 接入真实大模型：**文字修正**与**翻译**
+
+目前这两个引擎的代码已经写好并通过离线自测（用本地假服务端验证了失败分类、输出校验、
+增量翻译的三种触发条件），**但还没接过真实模型**，默认关闭。v0.2 要做的是：
+
+- 接入任意 OpenAI 兼容接口（本地 Ollama / vLLM / 云端皆可），端到端调优
+- **文字修正**：去口水词（嗯/啊/那个）、补标点、纠正同音错别字、数字规范化
+- **流式翻译**：原文与译文并行滚动，按句末标点/静默 1.5 s/长度阈值触发，
+  **已落定的段落永不重译**
+- 失败降级：认证/连接错误 → 提示改配置；超时/限流 → 静默回退识别原文
+- 默认开启，并提供中文/英文/代码注释等预设 Prompt
+
+### v0.3 —— 打包与易用性
+
+- 一键安装包（不再需要用户自己建 venv）
+- 开机自启 + 托盘图标
+- 音量波形、更细的悬浮窗主题
+- 词典热词的实际纠错（当前只作为 context 传给识别引擎）
+
+### 长期
+
+- 更多语言识别（模型本身支持中/英/日/韩等）
+- macOS / Linux 客户端的可行性（识别服务协议已经是跨平台的）
+
+## 八、许可
+
+本项目代码 **MIT**。运行时依赖与设计参考的许可见
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)（注意区分：R2T2 **代码** Apache-2.0，
+**权重** NetEase Model Use License）。
+
+---
+
+# English
+
+## What is EtherealFlow
+
+**A true-streaming voice input method that runs entirely on your own machine.**
+
+Hold a hotkey and speak — **you watch the words appear on screen as you talk**. Release the key
+and the cleaned-up text is injected into whatever input box you were already using.
+Speech never leaves your computer.
+
+![true streaming demo](docs/assets/streaming-demo.gif)
+
+## Why "true" streaming
+
+Most voice input tools transcribe **after** you stop talking: you hold, speak, release, wait —
+then the whole sentence pops up at once. If you misspoke, you only find out at the end.
+
+EtherealFlow transcribes **while you speak**. The recognition backend (Confucius4-R2T2) is a
+genuinely append-only streaming model: text already emitted is never revised, so what you see
+grows monotonically instead of flickering. That's the difference between *true* streaming and
+chunked pseudo-streaming.
+
+The name: **EtherealFlow = Ethereal (缥缈) + Flow**. In Chinese the single character 「流」 carries
+both meanings — **flow** (the psychology concept, 心流) and **streaming** (流式).
+
+## Runs locally — your voice stays on your machine
+
+```
+┌──────────── your Windows PC ─────────────┐
+│  microphone → client ─┐                  │
+│                       │ ws://127.0.0.1:18300
+│  overlay ←────────────┘                  │
+│                       ↓                  │
+│        ASR service inside WSL2           │
+│        Confucius4-R2T2 (llama.cpp+CUDA)  │
+│        ~2.5 GB VRAM, always resident     │
+└──────────────────────────────────────────┘
+        no internet · no cloud service
+```
+
+- **Audio never leaves the machine** — it is sent to `127.0.0.1:18300`, a service on your own PC.
+- **No API key, no per-minute billing** — the model weights are local.
+- **Bring your own ASR** — the client speaks one WebSocket protocol
+  (see [docs/protocol.md](docs/protocol.md)); swap in a self-hosted engine by replacing the server.
+
+> ⚠️ **Model weights are not bundled** (they're GB-scale). The recognition engine is
+> [Confucius4-R2T2](https://github.com/netease-youdao/Confucius4-R2T2) by NetEase Youdao:
+> code is Apache-2.0, but **weights are under the NetEase Model Use License** — a different
+> licence; check it yourself before commercial use. Deployment: [docs/development.md](docs/development.md).
+
+## Features
+
+| Feature | Status |
 |---|---|
-| 服务进程 RSS | **2010 MB，20 轮完全一致（无增长）** |
-| 显存 | 7836 MiB，恒定 |
-| 解码/实时 | 0.52–0.64，**无上升趋势**（首轮 0.64，末轮 0.59） |
+| Global push-to-talk hotkey (hold / release / Esc to cancel) | ✅ |
+| 16 kHz mono capture (auto-resamples if the device refuses 16 kHz) | ✅ |
+| **Streaming display** in a non-focus-stealing overlay | ✅ |
+| Text injection (clipboard+Ctrl+V, typing fallback, clipboard restore) | ✅ |
+| Automatic long-utterance segmentation | ✅ |
+| Auto reconnect / auto recovery after the service crashes | ✅ |
+| Settings UI | ✅ |
+| LLM text correction | 🟡 engine done, awaiting a real model |
+| Streaming bilingual translation | 🟡 engine done, awaiting a real model |
 
-即：**"长时间运行后变慢"在本机 20 轮内没有复现** —— 内存与显存都不涨，延迟只是正常抖动（±10%）。
-不过这只是 20 轮的观测，不是证明；真要长期挂着用，建议偶尔看一眼 `logs/service.log` 里的
-`decode_ms` 有没有系统性抬高。
+## Measured performance (RTX 4070 Laptop / WSL2)
 
-### 服务崩了会怎样（需求文档 风险 #2 / #6）
+| | |
+|---|---|
+| Model load | 4.3 s |
+| 6.74 s audio, streaming decode | 0.56× realtime, first character at **1.20 s** |
+| 33.70 s audio | 0.88× realtime |
+| 53.92 s audio | **1.15× realtime (falls behind)** → client auto-segments at 30 s |
+| After segmentation (8 s per segment) | **0.54× realtime** |
+| Windows → WSL handshake | 17 ms |
+| Bundle size | 58 MB (Python included, no install needed) |
 
-实测 `kill -9` 掉识别服务：
+## Quick start
 
+```bash
+# 1) deploy the ASR service into WSL (adds a directory; touches nothing existing)
+wsl.exe -d Ubuntu -u <user> -- bash -l "/mnt/d/<repo>/scripts/deploy_wsl.sh" --install-service --restart
+
+# 2) run the client
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install numpy sounddevice websockets
+.venv\Scripts\python.exe -m client.app
+
+# 3) hold Ctrl+Win, speak, release.
 ```
-r2t2-stream.service: Main process exited, code=killed, status=9/KILL
-r2t2-stream.service: Scheduled restart job, restart counter is at 2.
-r2t2-stream.service: Started CherryVoice R2T2 streaming ASR service
-★ 从进程消失到端口重新可用：13.4 秒
-```
 
-即 systemd 的 `Restart=always` 确实兜住了（约 13 秒 = `RestartSec=5` + 模型重新加载）。
-客户端侧会自动重连（已用 `tools/test_asr_reconnect.py` 单独验证过），
-所以用户感受到的就是"十几秒后又能用了"，不会永久失效。
+Settings: `python -m client.app --settings` ·
+Self-tests (no keypress, no speech, no API key needed): `python tools\run_all_tests.py`
 
-### 识别稳定性
+## Roadmap
 
-同一段音频重复跑 10 次，最终文本（含标点）**10/10 完全一致**。
-不过注意：标点并非在所有路径下都一样 —— 走麦克风回环时同一句话曾出现
-`酒水，也没` 与 `酒水也没` 的差异，所以需求文档 风险 #5 说的"标点抖动"
-在**换音频路径**时仍然存在，只是同一路径下是稳定的。
+**v0.2 — connect a real LLM: text correction and translation.**
+Both engines already exist in code and pass offline tests, but have never been pointed at a real
+model, so they ship disabled. v0.2 wires them to any OpenAI-compatible endpoint (local Ollama /
+vLLM / cloud), adds end-to-end tuning, and enables: des-stuttering (嗯/啊/那个), punctuation,
+homophone fixes, number normalisation, and **streaming translation** where the original and the
+translation scroll side by side and already-finalised segments are never re-translated.
 
-### 兼容性验收（需求文档 §10.3：至少 5 个应用）
+**v0.3 — packaging and ergonomics.** One-click installer, autostart + tray icon, richer overlay.
+**Longer term.** More recognition languages (the model already supports several), and
+macOS/Linux clients (the service protocol is already cross-platform).
 
-用 `tools/test_inject_apps.py` 往**真实第三方应用**注入并读回验证
-（注入后 `Ctrl+A`/`Ctrl+C`，从剪贴板读回比对）：
+## License
 
-| 应用 | 结果 | 说明 |
-|---|---|---|
-| 记事本 | ✅ 通过 | Win11 Store 版（`Notepad`），剪贴板+Ctrl+V，读回一致；标题变为 `*CherryVoice…` 佐证文档已改 |
-| Word | ✅ 通过 | `文档1 - Word`[`OpusApp`]，**逐字键入**模式，读回一致 |
-| Chrome | ✅ 通过 | 独立临时配置开新窗口，注入到网页 `<textarea>`，读回一致 |
-| VS Code | ⚪ 本机未安装 | —— |
-| 微信 / 飞书 | ⚪ 本机未安装 / 启动无窗口 | —— |
-
-**两种注入方式都在真实应用里过了**：记事本走剪贴板+Ctrl+V，Word 和 Chrome 走逐字键入
-（因为剪贴板里当时有上一轮复制出的富文本，非文本保护逻辑自动改走了键入 ——
-顺带把这条兜底路径也在真实 Office / 浏览器里验证了）。
-
-> 需求文档 §10.3 要求"至少 5 个应用"。本机只装了 3 个可测的，
-> 所以**只完成了 3 个** —— 这三个是实打实注入进去并读回来的，不是"应该没问题"。
-> 复现：`python tools\test_inject_apps.py`
+Code is **MIT**. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for runtime dependencies
+and design references — note that Confucius4-R2T2 *code* is Apache-2.0 while its *weights* are
+under the NetEase Model Use License.

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""CherryVoice · P3 验收：**完整闭环**。
+"""EtherealFlow · P3 验收：**完整闭环**。
 
     说话 → 悬浮窗出字 → 松开 → LLM 修正 → 修正后的文本进当前输入框
 
@@ -78,7 +78,7 @@ def main() -> int:
     # 目标输入框
     root = tk.Tk()
     w32.enable_dpi_awareness()
-    root.title("CherryVoice 闭环验收目标")
+    root.title("EtherealFlow 闭环验收目标")
     root.geometry("720x240+180+180")
     text = tk.Text(root, font=("Microsoft YaHei UI", 13))
     text.pack(fill="both", expand=True)

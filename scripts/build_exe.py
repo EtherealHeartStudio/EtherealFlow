@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""CherryVoice · 打包成免安装的 Windows 可执行文件。
+"""EtherealFlow · 打包成免安装的 Windows 可执行文件。
 
 用法（在仓库根目录）::
 
@@ -12,7 +12,7 @@
 
 * 目录版启动快、被杀软误报的概率低（单文件版每次启动都要解包）；
 * 无控制台是因为它是输入法，不该常驻一个黑框 —— 日志已经同时落到
-  ``%APPDATA%/CherryVoice/logs/client.log``，出问题看那个文件。
+  ``%APPDATA%/EtherealFlow/logs/client.log``，出问题看那个文件。
 
 ``--collect-all sounddevice`` 是必须的：PortAudio 的 DLL 是包内数据文件，
 不显式收集的话打出来的 exe 一运行就报找不到库。
@@ -28,11 +28,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 ENTRY = ROOT / "run_client.py"
-APP_NAME = "CherryVoice"
+APP_NAME = "EtherealFlow"
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="打包 CherryVoice")
+    parser = argparse.ArgumentParser(description="打包 EtherealFlow")
     parser.add_argument("--onefile", action="store_true", help="打成单个 exe（启动稍慢）")
     parser.add_argument("--console", action="store_true", help="保留控制台窗口（排查用）")
     parser.add_argument("--name", default=APP_NAME)

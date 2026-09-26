@@ -1,4 +1,4 @@
-# CherryVoice 架构说明
+# EtherealFlow 架构说明
 
 ## 1. 为什么必须两段式
 
@@ -38,7 +38,7 @@
 | `client/translator.py` | 增量流式翻译 | 只翻译新增部分；分段 append-only |
 | `client/inject.py` | 文本注入 | 剪贴板 + Ctrl+V 主方案，逐字键入兜底，剪贴板保护 |
 | `client/app.py` | 主程序：把上面串起来 | 主线程跑 tkinter，其余全在后台线程 |
-| `client/config.py` | 配置 | 存 `%APPDATA%/CherryVoice/`，不进仓库 |
+| `client/config.py` | 配置 | 存 `%APPDATA%/EtherealFlow/`，不进仓库 |
 | `client/settings_ui.py` | 设置界面（FR-7 六分组） | `apply()`/`collect()` 与界面分离，便于脱机测试 |
 
 ## 3. 一次说话的完整时序

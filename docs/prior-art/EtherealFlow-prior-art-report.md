@@ -1,4 +1,4 @@
-# CherryVoice 前期技术调研（源码级）
+# EtherealFlow 前期技术调研（源码级）
 
 方式：GitHub API 取文件树 [cite:b9a62c46-1][cite:b9a62c46-2][cite:b9a62c46-3] 后逐文件下载精读。push-2-talk/VoiceX 为完整 clone，typeflux 为 raw 单文件抓取（其 zip 下载失败，未做全仓 clone）。
 

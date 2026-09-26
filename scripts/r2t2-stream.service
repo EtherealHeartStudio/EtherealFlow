@@ -1,5 +1,5 @@
 [Unit]
-Description=CherryVoice R2T2 streaming ASR service (WebSocket)
+Description=EtherealFlow R2T2 streaming ASR service (WebSocket)
 Documentation=https://github.com/
 After=network.target
 

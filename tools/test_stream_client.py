@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""CherryVoice · P1 验收客户端：把一份 WAV 推给流式识别服务，打印逐行 partial。
+"""EtherealFlow · P1 验收客户端：把一份 WAV 推给流式识别服务，打印逐行 partial。
 
 零第三方依赖（只用标准库），因此 **Windows 和 WSL 都能直接跑**，
 同时也是验证 "Windows → WSL localhost 转发" 的工具。
@@ -15,7 +15,7 @@
 
     # 指定其它地址 / 语言 / 热词
     python tools/test_stream_client.py --wav a.wav --url ws://127.0.0.1:18300 \
-        --language Chinese --context "CherryVoice,Confucius4"
+        --language Chinese --context "EtherealFlow,Confucius4"
 """
 
 from __future__ import annotations
@@ -198,7 +198,7 @@ def load_wav_as_pcm16k(path: str) -> bytes:
 # --------------------------------------------------------------------------- #
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="CherryVoice 流式识别服务验收客户端")
+    parser = argparse.ArgumentParser(description="EtherealFlow 流式识别服务验收客户端")
     parser.add_argument("--wav", required=True, help="输入 WAV（任意采样率/声道，会转成 16k 单声道）")
     parser.add_argument("--url", default="ws://127.0.0.1:18300")
     parser.add_argument("--language", default=None, help="自动/Chinese/English；留空=自动")

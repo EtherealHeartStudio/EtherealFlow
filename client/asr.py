@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""CherryVoice · 识别服务客户端（WebSocket，后台线程 + 自动重连）。
+"""EtherealFlow · 识别服务客户端（WebSocket，后台线程 + 自动重连）。
 
 对应需求文档 §7.1 协议。设计要点：
 

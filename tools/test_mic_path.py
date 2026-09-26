@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""CherryVoice · 验证**真实音频采集链路**（MicCapture → 识别服务）。
+"""EtherealFlow · 验证**真实音频采集链路**（MicCapture → 识别服务）。
 
 两种模式，自动选择：
 

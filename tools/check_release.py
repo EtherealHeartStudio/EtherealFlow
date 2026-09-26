@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""CherryVoice · 发布前安全检查（需求文档 §11.3）。
+"""EtherealFlow · 发布前安全检查（需求文档 §11.3）。
 
     [ ] 全文搜索确认无 API Key / Token / 个人路径泄露
     [ ] 硬编码的本地路径改为可配置
@@ -31,7 +31,12 @@ SKIP_DIRS = {".git", ".venv", "venv", "__pycache__", "build", "dist", "logs",
 TEXT_EXT = {".py", ".md", ".json", ".sh", ".service", ".txt", ".yaml", ".yml",
             ".toml", ".cfg", ".ini", ".spec", ".bat", ".ps1", ".cmd", ""}
 BIG_BINARY_EXT = {".gguf", ".safetensors", ".bin", ".pt", ".pth", ".onnx", ".mp4",
-                  ".zip", ".7z", ".exe", ".dll", ".so", ".pyd", ".wav", ".png"}
+                  ".zip", ".7z", ".tar", ".gz", ".exe", ".dll", ".so", ".pyd",
+                  ".wav", ".mp3", ".png", ".gif", ".jpg", ".jpeg", ".webp", ".svg",
+                  ".pdf"}
+# 说明：这里必须把 README 会用到的图片/动画后缀都列上。漏掉 .gif 的后果是
+# 「较大的文件」那一节对演示动图完全不报告 —— 而它恰恰是最容易悄悄塞进
+# 几 MB 二进制、把仓库拖肿的东西。
 
 # ---- 规则 ---------------------------------------------------------------- #
 # (名称, 严重级别, 正则, 说明, 允许出现的文件/路径片段)
@@ -122,6 +127,49 @@ def rel(path: Path, root: Path) -> str:
         return path.relative_to(root).as_posix()
     except ValueError:
         return path.as_posix()
+
+
+def line_ending_problems(root: Path) -> tuple[list[str], list[str]]:
+    """盯住 shell 脚本的行尾。
+
+    为什么专门查 ``.sh``：CRLF 的 shell 脚本交给 bash 会在第一行
+    ``set -euo pipefail\\r`` 上报错，而报错信息并不指向行尾，排查很费时间。
+    本项目的部署路径正是「Windows 上编辑、WSL 里 bash 执行」，
+    所以仓库里一旦存进 CRLF 的 .sh，别人 clone 下来就会踩到。
+
+    看的是 ``git ls-files --eol`` 里的 **index** 那一列（``i/lf``）：
+    它才是真正被提交、被别人拿到的内容，且不受本机 ``core.autocrlf`` 影响。
+    """
+    git = _git_exe()
+    if not git or not (root / ".git").exists():
+        return [], []
+    try:
+        proc = subprocess.run([git, "ls-files", "--eol"], cwd=str(root),
+                              capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return [], []
+    blockers: list[str] = []
+    warns: list[str] = []
+    for line in proc.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 2:
+            continue
+        fields = parts[0].split()
+        path = parts[1].strip()
+        idx = next((f for f in fields if f.startswith("i/")), "")
+        wtree = next((f for f in fields if f.startswith("w/")), "")
+        if not path.endswith(".sh"):
+            continue
+        if idx != "i/lf":
+            blockers.append("%s 在 git 索引里的行尾是 %s —— shell 脚本必须以 LF 入库，"
+                            "否则别人 clone 出来跑 bash 会在 "
+                            "`set -euo pipefail\\r` 上直接失败" % (path, idx))
+        if wtree not in ("w/lf", "w/-text", "w/none"):
+            warns.append("%s 的工作区副本行尾是 %s —— 从 /mnt 直接喂给 WSL 的 bash 会出错。"
+                         "修法：git rm --cached -r . && git reset --hard"
+                         % (path, wtree))
+    return blockers, warns
 
 
 def main() -> int:
@@ -252,6 +300,11 @@ def main() -> int:
                             continue
                         entry = "%s:%d  %s → %r" % (rel_p, line_no, why, m.group(0)[:60])
                         (blockers if level == "BLOCKER" else warns).append(entry)
+
+    # 行尾：仓库里存进 CRLF 的 .sh 是「一 clone 就坏」的隐患，必须在发布前拦住
+    eol_blockers, eol_warns = line_ending_problems(root)
+    blockers.extend(eol_blockers)
+    warns.extend(eol_warns)
 
     # ---- 输出 ---- #
     if not args.quiet:

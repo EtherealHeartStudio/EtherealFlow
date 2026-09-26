@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""CherryVoice · 一键跑完所有离线自测。
+"""EtherealFlow · 一键跑完所有离线自测。
 
 这些测试**都不需要**人按键、不需要人说话、不需要真的 API Key、
 也不需要识别服务或麦克风（少数项会自动降级成 SKIP 并说明原因）。

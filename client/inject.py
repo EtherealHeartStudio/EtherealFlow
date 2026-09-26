@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""CherryVoice · 文本注入（FR-6）。
+"""EtherealFlow · 文本注入（FR-6）。
 
 主方案 **剪贴板 + 模拟 Ctrl+V**（兼容性最好），备选 **SendInput 逐字键入**
 （给拒绝粘贴的应用兜底）。全部用 ctypes，零第三方依赖。

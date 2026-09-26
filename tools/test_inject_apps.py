@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""CherryVoice · 需求文档 §10.3 兼容性验收：往**真实第三方应用**里注入。
+"""EtherealFlow · 需求文档 §10.3 兼容性验收：往**真实第三方应用**里注入。
 
 在此之前，注入只验证到"进程内自己的 Tk 文本框"为止 —— 那不算兼容性验收。
 
@@ -35,7 +35,7 @@ from client.inject import (Injector, clipboard_get_text,   # noqa: E402
 
 VK_CTRL, VK_A, VK_C, VK_DELETE = 0x11, 0x41, 0x43, 0x2E
 SENTINEL = "CV-CLIP-SENTINEL-请勿保留"
-MARK = "CherryVoice兼容性验收123"
+MARK = "EtherealFlow兼容性验收123"
 WM_CLOSE = 0x0010
 
 WINWORD = r"C:\Program Files\Microsoft Office\root\Office16\WINWORD.EXE"
@@ -90,7 +90,7 @@ def make_chrome_page() -> str:
     """给 Chrome 造一个带自动聚焦文本框的本地页面，作为注入靶子。"""
     page = Path.home() / "AppData/Local/Temp/cv-inject-target.html"
     page.write_text(
-        "<!doctype html><meta charset='utf-8'><title>CherryVoice 注入靶</title>"
+        "<!doctype html><meta charset='utf-8'><title>EtherealFlow 注入靶</title>"
         "<body style='margin:0'>"
         "<textarea id='t' autofocus style='width:100%;height:92vh;font-size:18px;"
         "border:0;outline:0;padding:24px'></textarea>"

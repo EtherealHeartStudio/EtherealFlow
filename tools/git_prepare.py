@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""CherryVoice · 准备本地 git 仓库（为发布做准备）。
+"""EtherealFlow · 准备本地 git 仓库（为发布做准备）。
 
 做的事：
 
@@ -13,8 +13,8 @@
 用法::
 
     python tools/git_prepare.py                 # 准备 + 打印将要提交的内容
-    python tools/git_prepare.py --commit        # 有身份时提交并打 v1.0.0 tag
-    python tools/git_prepare.py --tag v1.0.0
+    python tools/git_prepare.py --commit        # 有身份时提交并打 v0.1.0 tag
+    python tools/git_prepare.py --tag v0.1.0
 """
 
 from __future__ import annotations
@@ -52,10 +52,21 @@ def run(git: str, *args: str, check: bool = True) -> subprocess.CompletedProcess
     return proc
 
 
+def staged_files(git: str) -> list[str]:
+    """已暂存的文件名（相对仓库根）。
+
+    必须用 ``-z`` 拿 NUL 分隔的输出：仓库里有带空格的文件名（例如
+    ``启动 EtherealFlow.bat``），按行输出再 ``.split()`` 会把它劈成两个名字，
+    清单条数和「.gitignore 有没有漏」的判断都会失真。
+    """
+    out = run(git, "diff", "--cached", "--name-only", "-z").stdout
+    return [p for p in out.split("\0") if p]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--commit", action="store_true", help="有身份时提交并打 tag")
-    parser.add_argument("--tag", default="v1.0.0")
+    parser.add_argument("--tag", default="v0.1.0")
     parser.add_argument("--message", default="", help="提交信息（默认自动生成）")
     args = parser.parse_args()
 
@@ -85,7 +96,7 @@ def main() -> int:
     staged = [line for line in porcelain.splitlines() if line and not line.startswith("??")]
     untracked = [line[3:] for line in porcelain.splitlines() if line.startswith("??")]
 
-    files = run(git, "diff", "--cached", "--name-only").stdout.split()
+    files = staged_files(git)
     print("=" * 74)
     print("将要提交的文件（%d 个）：" % len(files))
     for f in sorted(files):
@@ -126,17 +137,17 @@ def main() -> int:
         print('  git config --global user.email "you@example.com"')
         print("然后重新运行：python tools/git_prepare.py --commit")
         print("\n文件已经 staged，你也可以直接自己提交：")
-        print('  git commit -m "CherryVoice v1.0.0: 流式语音输入法首发"')
+        print('  git commit -m "EtherealFlow v0.1.0: 流式语音输入法首发"')
         return 0
 
-    has_staged = bool(run(git, "diff", "--cached", "--name-only").stdout.strip())
+    has_staged = bool(staged_files(git))
     if not has_staged:
         print("没有待提交的改动，跳过 commit")
     else:
         message = args.message
         if not message:
             subject = run(git, "log", "--oneline", "-1", check=False).stdout.strip()
-            message = ("CherryVoice v1.0.0: Windows 流式语音输入法\n\n"
+            message = ("EtherealFlow v0.1.0: Windows 流式语音输入法\n\n"
                        "- WSL 流式识别服务（WebSocket，包装 Confucius4-R2T2 llama.cpp 后端）\n"
                        "- Windows 客户端：全局热键 / 16k 采集 / 不抢焦点悬浮窗\n"
                        "- LLM 整段修正（失败分类 + 输出校验）\n"
@@ -153,7 +164,7 @@ def main() -> int:
     if existing_tag:
         print("tag %s 已存在，跳过" % args.tag)
     else:
-        run(git, "tag", "-a", args.tag, "-m", "CherryVoice %s" % args.tag)
+        run(git, "tag", "-a", args.tag, "-m", "EtherealFlow %s" % args.tag)
         print("已打 tag %s" % args.tag)
 
     print("\n最近提交：")
