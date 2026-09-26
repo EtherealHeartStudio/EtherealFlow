@@ -19,14 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-第三方组件与许可（本仓库不包含它们的代码，仅作为依赖或设计参考）
-
-* **Confucius4-R2T2**（网易有道）—— 代码 Apache-2.0；**模型权重按
-  NetEase Model Use License**（与代码许可不同，商用前请自行确认）。
-  本仓库**不包含**任何模型权重，只通过 `import` 调用用户自行部署的服务。
-* 设计参考（**未复制任何代码**）：Typeflux（AGPL-3.0，仅借设计思路）、
-  CapsWriter-Offline / opentypeless / openwhispr / push-2-talk / VoiceX（均为 MIT）。
-  详见 `docs/prior-art/`。
