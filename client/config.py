@@ -54,7 +54,21 @@ def deep_merge(base: dict, override: dict) -> dict:
 
 
 def default_config_dir() -> Path:
-    base = os.environ.get("APPDATA") or os.environ.get("XDG_CONFIG_HOME")
+    """配置目录。
+
+    Windows 上先问系统要「漫游 AppData」的**真实路径**，而不是只看
+    ``%APPDATA%`` 环境变量 —— 变量缺失时（受限进程/自动化环境）会掉到
+    ``~/.cherryvoice``，导致**同一个程序在不同启动方式下读写两份配置**。
+    """
+    if os.name == "nt":
+        try:
+            from .win32 import roaming_appdata
+            found = roaming_appdata()
+            if found:
+                return Path(found) / APP_NAME
+        except Exception:  # noqa: BLE001
+            pass
+    base = os.environ.get("XDG_CONFIG_HOME")
     if base:
         return Path(base) / APP_NAME
     return Path.home() / (".config" if os.name != "nt" else "." + APP_NAME.lower())

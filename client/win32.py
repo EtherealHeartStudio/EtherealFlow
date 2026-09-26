@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes as wt
+from pathlib import Path
 from typing import Optional
 
 # --------------------------------------------------------------------------- #
@@ -326,6 +327,62 @@ def find_window_by_pid(pid: int) -> Optional[int]:
 
 def is_key_down(vk: int) -> bool:
     return bool(user32.GetAsyncKeyState(vk) & 0x8000)
+
+
+# --------------------------------------------------------------------------- #
+# Windows 已知文件夹（配置/日志该放哪）
+# --------------------------------------------------------------------------- #
+
+class GUID(ctypes.Structure):
+    _fields_ = [("Data1", ctypes.c_ulong), ("Data2", ctypes.c_ushort),
+                ("Data3", ctypes.c_ushort), ("Data4", ctypes.c_ubyte * 8)]
+
+
+# {3EB685DB-65F9-4CF6-A03A-E3EF65729F3D} = FOLDERID_RoamingAppData
+FOLDERID_ROAMING_APPDATA = "3EB685DB-65F9-4CF6-A03A-E3EF65729F3D"
+
+
+def known_folder(folder_id: str) -> Optional[str]:
+    """查 Windows 已知文件夹路径（比读环境变量可靠）。
+
+    **为什么需要**：只认 ``%APPDATA%`` 环境变量的话，一旦变量没被设置
+    （某些受限进程、服务、自动化环境里就是这样），路径会掉到
+    ``~/.<app>``，于是**同一个程序在不同启动方式下会读写两份不同的配置** ——
+    实测踩到过：我这边写到 ``C:\\Users\\x\\.cherryvoice\\config.json``，
+    而用户正常双击运行时读的是 ``%APPDATA%\\CherryVoice\\config.json``。
+    """
+    try:
+        ctypes.windll.shell32.SHGetKnownFolderPath.argtypes = [
+            ctypes.POINTER(GUID), wt.DWORD, wt.HANDLE, ctypes.POINTER(ctypes.c_wchar_p)]
+        buf = ctypes.c_wchar_p()
+        parts = folder_id.strip("{}").split("-")
+        g = GUID(int(parts[0], 16),
+                 int(parts[1], 16),
+                 int(parts[2], 16),
+                 (ctypes.c_ubyte * 8)(*bytes.fromhex(parts[3] + parts[4])))
+        if ctypes.windll.shell32.SHGetKnownFolderPath(
+                ctypes.byref(g), 0, None, ctypes.byref(buf)) == 0 and buf.value:
+            path = buf.value
+            ctypes.windll.ole32.CoTaskMemFree(buf)
+            return path
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def roaming_appdata() -> Optional[str]:
+    """漫游 AppData 目录：优先问 Windows，其次环境变量，再次按用户名拼。"""
+    found = known_folder(FOLDERID_ROAMING_APPDATA)
+    if found:
+        return found
+    import os
+    for var in ("APPDATA",):
+        if os.environ.get(var):
+            return os.environ[var]
+    profile = os.environ.get("USERPROFILE")
+    if profile:
+        return str(Path(profile) / "AppData" / "Roaming")
+    return None
 
 
 # --------------------------------------------------------------------------- #
