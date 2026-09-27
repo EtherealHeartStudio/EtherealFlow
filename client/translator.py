@@ -30,6 +30,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+from .textutil import smart_join
+
 # 句末标点：中英文都算。逗号/顿号**不算** —— 按逗号切会把语义切碎，译文很跳。
 SENTENCE_END = "。！？!?；;…"
 _CJK = re.compile(r"[\u4e00-\u9fff\u3040-\u30ff]")
@@ -235,7 +237,8 @@ class IncrementalTranslator:
             return
         with self._lock:
             self._segments.append((source, outcome.text))
-            self.translation = "".join(t for _s, t in self._segments)
+            # 必须用 smart_join：英文译文直接硬拼会变成 "…afternoon.Discuss…"
+            self.translation = smart_join(t for _s, t in self._segments)
             text = self.translation
         self.on_update(text)
 

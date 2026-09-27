@@ -16,6 +16,11 @@ from typing import Any, Optional
 
 APP_NAME = "EtherealFlow"
 
+# LLM 请求超时默认值。抽成常量是因为它散落在客户端、设置界面、配置三处，
+# 各写一个 8.0 迟早会漂移。取 15 s 的理由：本机小模型第一次调用要加载权重，
+# 8 秒偏紧；而超时只会**静默降级为识别原文**，所以宁可比模型慢一点，也别把结果丢了。
+DEFAULT_LLM_TIMEOUT = 15.0
+
 DEFAULT_CONFIG: dict[str, Any] = {
     "hotkey": {"keys": ["ctrl", "win"], "backend": "polling", "swallow": True},
     "asr": {"url": "ws://127.0.0.1:18300", "language": None, "context": "",
@@ -27,7 +32,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "base_url": "http://127.0.0.1:8317/v1",
         "api_key": "",
         "model": "",
-        "timeout": 8.0,
+        # 本机小模型第一次调用要加载权重，8 秒偏紧；15 秒是「够用又不至于让人干等」的折中。
+        # 超时会静默降级为识别原文，所以宁可比模型慢一点，也别把结果丢了。
+        "timeout": DEFAULT_LLM_TIMEOUT,
         "max_tokens": 1024,
         "prompt": "",
         "translate_prompt": "",

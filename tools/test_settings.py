@@ -15,7 +15,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from client.config import DEFAULT_CONFIG, load_config, mask_secret, save_config  # noqa: E402
+from client.config import (DEFAULT_CONFIG, DEFAULT_LLM_TIMEOUT,  # noqa: E402
+                           load_config, mask_secret, save_config)
 from client.settings_ui import SettingsWindow                                    # noqa: E402
 
 SHOT = Path(tempfile.gettempdir()) / "cv-settings.png"
@@ -90,7 +91,8 @@ def main() -> int:
     win.vars["translate_chunk"].set("")
     weird = win.collect()
     check("数字项填错时回退默认值而不是抛异常",
-          weird["llm"]["timeout"] == 8.0 and weird["translate"]["chunk_chars"] == 40,
+          weird["llm"]["timeout"] == DEFAULT_LLM_TIMEOUT
+          and weird["translate"]["chunk_chars"] == 40,
           "timeout=%r chunk=%r" % (weird["llm"]["timeout"], weird["translate"]["chunk_chars"]))
 
     # 键位解析
@@ -103,6 +105,36 @@ def main() -> int:
     check("快捷键填空时回退默认 ctrl+win",
           win.collect()["hotkey"]["keys"] == ["ctrl", "win"],
           "%r" % win.collect()["hotkey"]["keys"])
+
+    # ---------- 布局回归 ---------- #
+    # 断言输入控件**真正长在行 Frame 里**。这条守的是两个都真实发生过的 bug：
+    #
+    #   a) ``_row()`` 里忘了指定容器，控件被装到页签上 —— 标题一列、控件另起一列；
+    #   b) 用 ``pack(in_=line)`` 补救：几何位置对了，但控件仍以页签为父容器，
+    #      且它**先于行 Frame 创建**，Z 序上被后建的 Frame 盖住 ——
+    #      位置全对、``winfo_ismapped()`` 也是 1，画面上却什么都看不见。
+    #
+    # 所以判据必须是**父子层级**（``ch.master``），不能只看几何归属：
+    # 只看几何的话 (b) 会被判为通过，而它恰恰是最难发现的那个。
+    nb = next(c for c in win.root.winfo_children() if c.winfo_class() == "TNotebook")
+    stray = []
+    for i in range(nb.index("end")):
+        tid = nb.tabs()[i]
+        nb.select(tid)                     # 不选中页签，Tk 不做布局
+        win.root.update()
+        win.root.update_idletasks()
+        page = win.root.nametowidget(tid)
+        title = nb.tab(tid, "text")
+        for ch in page.winfo_children():
+            if ch.winfo_class() not in ("TEntry", "TCombobox"):
+                continue
+            if str(ch.master) == str(page):
+                stray.append("%s/%s" % (title, ch.winfo_class()))
+    check("布局：输入控件必须真正长在行 Frame 里（父容器不能是页签）",
+          not stray, "越位控件：%s" % stray)
+
+    nb.select(nb.tabs()[0])
+    win.root.update()
 
     # 截图（人眼确认）
     win.apply(got)

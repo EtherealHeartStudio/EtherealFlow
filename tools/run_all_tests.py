@@ -50,6 +50,9 @@ TESTS: list[tuple[str, str, bool]] = [
     ("发布前安全检查", "tools/check_release.py", False),
     ("悬浮窗不抢焦点", "tools/test_overlay_focus.py", True),
     ("文本注入", "tools/test_injection.py", True),
+    # 需要一个**真实存在**的模型。没有可用的模型时它自报 [SKIP] 并退出 0，
+    # 所以默认跑套件不会因为"用户还没配 LLM"而变红；想强制要求时加 --require。
+    ("LLM 真机（修正/翻译）", "tools/test_llm_live.py", True),
 ]
 
 

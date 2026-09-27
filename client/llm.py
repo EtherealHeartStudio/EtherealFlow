@@ -31,6 +31,8 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from .config import DEFAULT_LLM_TIMEOUT
+
 # --------------------------------------------------------------------------- #
 # 异常分类
 # --------------------------------------------------------------------------- #
@@ -113,6 +115,80 @@ HOTWORD_LINE = ("参考热词（仅用于纠正同音错别字，**不要把它�
 # --------------------------------------------------------------------------- #
 # 结果与校验
 # --------------------------------------------------------------------------- #
+
+# --------------------------------------------------------------------------- #
+# 常用预设
+# --------------------------------------------------------------------------- #
+
+# 用户不该为了「接一个模型」去翻各家的文档找地址。这里按「本地优先」排列，
+# 因为本项目主打语音不出机器，本地模型才是首选。
+#
+# ``api_key: ""`` 是有意的**清空**（本机服务不校验 Key，留着反而可能被拒）；
+# 云端预设**不带** api_key 键 —— 表示「保留用户已填的 Key」，只换地址和模型名，
+# 免得用户选一下预设就把辛苦贴进去的 Key 弄丢了。
+PRESETS: list[tuple[str, dict[str, str]]] = [
+    ("本地 · Ollama", {"base_url": "http://localhost:11434/v1",
+                       "model": "qwen2.5:7b", "api_key": ""}),
+    ("本地 · LM Studio", {"base_url": "http://localhost:1234/v1",
+                          "model": "", "api_key": ""}),
+    ("本地 · llama.cpp server", {"base_url": "http://localhost:8080/v1",
+                                 "model": "", "api_key": ""}),
+    ("本地 · vLLM", {"base_url": "http://localhost:8000/v1",
+                     "model": "", "api_key": ""}),
+    ("本地 · CLIProxy 等代理（8317）", {"base_url": "http://127.0.0.1:8317/v1",
+                                        "model": "", "api_key": ""}),
+    ("云端 · OpenAI", {"base_url": "https://api.openai.com/v1",
+                       "model": "gpt-4o-mini"}),
+    ("云端 · DeepSeek", {"base_url": "https://api.deepseek.com/v1",
+                         "model": "deepseek-chat"}),
+    ("云端 · 月之暗面 Kimi", {"base_url": "https://api.moonshot.cn/v1",
+                              "model": "moonshot-v1-8k"}),
+    ("云端 · 智谱 GLM", {"base_url": "https://open.bigmodel.cn/api/paas/v4",
+                         "model": "glm-4-flash"}),
+    ("云端 · 阿里通义（兼容模式）",
+     {"base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "model": "qwen-plus"}),
+    ("云端 · 硅基流动 SiliconFlow", {"base_url": "https://api.siliconflow.cn/v1",
+                                     "model": "Qwen/Qwen2.5-7B-Instruct"}),
+]
+
+
+def apply_preset(cfg: dict, preset: dict[str, str]) -> dict:
+    """把预设套到配置上。**不带 api_key 的预设不会清掉用户已填的 Key。**"""
+    for key in ("base_url", "model", "api_key"):
+        if key in preset:
+            cfg[key] = preset[key]
+    return cfg
+
+
+def normalize_base_url(url: str) -> str:
+    """把用户填的地址收拾成「能直接拼 /chat/completions」的形式。
+
+    这个函数是**真机联调逼出来的**：让用户手填一个地址，他一定会填出各种写法，
+    而每一种都得能用，否则「配好了却连不上」。要能吃下的写法：
+
+        http://localhost:11434                     → …/v1   （Ollama 的根地址）
+        http://localhost:1234/v1/                  → …/v1   （多余尾斜杠）
+        http://localhost:8080/v1/chat/completions  → …/v1   （直接粘了完整端点）
+        127.0.0.1:8317/v1                          → http://127.0.0.1:8317/v1（补协议）
+        http://host:8000/api                       → 原样    （非标准路径不要乱补）
+    """
+    text = (url or "").strip()
+    if not text:
+        return ""
+    text = text.rstrip("/")
+    for suffix in ("/chat/completions", "/completions"):
+        if text.endswith(suffix):
+            text = text[: -len(suffix)].rstrip("/")
+            break
+    if "://" not in text:
+        text = "http://" + text
+    parts = urllib.parse.urlsplit(text)
+    # 只有路径为空或就是根时才补 /v1 —— 用户自己写了 /api 之类就别自作主张
+    if parts.path in ("", "/"):
+        text = text.rstrip("/") + "/v1"
+    return text
+
 
 @dataclass
 class Completion:
@@ -208,10 +284,10 @@ def validate_output(original: str, output: str,
 class LlmClient:
     def __init__(self, base_url: str = "http://127.0.0.1:8317/v1",
                  api_key: str = "", model: str = "",
-                 timeout: float = 8.0, max_tokens: int = 1024,
+                 timeout: float = DEFAULT_LLM_TIMEOUT, max_tokens: int = 1024,
                  correct_prompt: str = CORRECT_PROMPT,
                  translate_prompt: str = TRANSLATE_PROMPT) -> None:
-        self.base_url = (base_url or "").rstrip("/")
+        self.base_url = normalize_base_url(base_url)
         self.api_key = api_key or ""
         self.model = model or ""
         self.timeout = float(timeout)
@@ -283,6 +359,73 @@ class LlmClient:
 
         return Completion(text=text, model=payload.get("model", self.model),
                           elapsed_ms=elapsed, usage=payload.get("usage") or {})
+
+    def list_models(self) -> list[str]:
+        """列出服务端可用模型（OpenAI 兼容 ``GET /v1/models``）。
+
+        作用是双向的：
+
+        1. **省得用户记模型名**。本地部署的名字（``qwen2.5:7b``、
+           ``llama-3.2-3b-instruct``）没人记得住，设置界面直接拉下来给用户选。
+        2. 它同时是**最轻量的连通性检查** —— 能列出模型就说明地址和 Key 都对，
+           比发一次真实的补全请求便宜得多，适合做成"测试连接"按钮。
+        """
+        url = self.base_url + "/models"
+        headers = {"Accept": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = "Bearer " + self.api_key
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                payload = json.loads(resp.read().decode("utf-8", "replace"))
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            try:
+                detail = exc.read().decode("utf-8", "replace")[:200]
+            except Exception:  # noqa: BLE001
+                pass
+            raise self._classify_http(exc.code, detail) from exc
+        except (socket.timeout, TimeoutError) as exc:
+            if not self._probe_reachable():
+                raise LlmConnectionError(
+                    "连不上 %s（TCP 不可达，服务可能没启动）" % self.base_url) from exc
+            raise LlmTimeoutError("列出模型超时（>%.0fs）" % self.timeout) from exc
+        except urllib.error.URLError as exc:
+            raise LlmConnectionError("连不上 %s：%s"
+                                     % (self.base_url, getattr(exc, "reason", exc))) from exc
+        except json.JSONDecodeError as exc:
+            raise LlmServerError("返回的不是合法 JSON（该地址可能不是 OpenAI 兼容接口）"
+                                 ) from exc
+
+        data = payload.get("data")
+        if not isinstance(data, list):
+            data = payload.get("models") or []      # 少数实现用 models
+        ids: list[str] = []
+        for item in data:
+            mid = item.get("id") or item.get("name") if isinstance(item, dict) else str(item)
+            if mid:
+                ids.append(str(mid))
+        return sorted(ids)
+
+    def test_connection(self) -> tuple[bool, str]:
+        """给设置界面的「测试连接」用：返回 ``(是否通, 给人看的说明)``。
+
+        这里把 ``LlmError`` 的分类**原样保留**成文字，因为分类本身就是给用户看的
+        诊断结论：Key 错了和模型太慢是两件完全不同的事，不能都显示"连接失败"。
+        """
+        try:
+            models = self.list_models()
+        except LlmError as exc:
+            return False, "%s（%s）" % (exc, exc.code)
+        except Exception as exc:  # noqa: BLE001
+            return False, repr(exc)
+        if not models:
+            return True, "连通，但服务端没有报告任何模型（可手动填模型名）"
+        if self.model and self.model not in models:
+            return True, ("连通，共 %d 个模型；但没找到「%s」，请确认名字拼写"
+                          % (len(models), self.model))
+        return True, "连通，共 %d 个模型%s" % (
+            len(models), "，已找到「%s」" % self.model if self.model else "")
 
     def _probe_reachable(self, timeout: float = 1.0) -> bool:
         """快速探一下 host:port 的 TCP 可达性，用来区分"服务没起来"和"模型太慢"。"""
@@ -373,7 +516,7 @@ def default_client(cfg: Optional[dict] = None) -> LlmClient:
     return LlmClient(base_url=cfg.get("base_url", "http://127.0.0.1:8317/v1"),
                      api_key=cfg.get("api_key", ""),
                      model=cfg.get("model", ""),
-                     timeout=cfg.get("timeout", 8.0),
+                     timeout=cfg.get("timeout", DEFAULT_LLM_TIMEOUT),
                      max_tokens=cfg.get("max_tokens", 1024),
                      correct_prompt=cfg.get("prompt") or CORRECT_PROMPT,
                      translate_prompt=cfg.get("translate_prompt") or TRANSLATE_PROMPT)

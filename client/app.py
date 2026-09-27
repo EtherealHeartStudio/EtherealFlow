@@ -37,6 +37,7 @@ from .inject import default_injector
 from .llm import default_client
 from .overlay import Overlay
 from .settings_ui import SettingsWindow
+from .textutil import smart_join
 from .translator import default_translator
 
 def emit(text: str) -> None:
@@ -118,9 +119,10 @@ class App:
     def _on_partial(self, text: str) -> None:
         if not text:
             return
-        self.overlay.set_text(self._prefix + text)
+        full = smart_join([self._prefix, text])
+        self.overlay.set_text(full)
         if self.translator is not None:
-            self.translator.update(self._prefix + text)
+            self.translator.update(full)
         self._maybe_rotate()
 
     def _maybe_rotate(self) -> None:
@@ -138,7 +140,8 @@ class App:
         """一段结束：把结果**追加**到前缀，然后无缝开下一段。"""
         part = (msg.get("text") or "").strip()
         if part:
-            self._prefix += part
+            # 说英文时直接相加会粘成一个词，交给 smart_join 按需补空格
+            self._prefix = smart_join([self._prefix, part])
         self._rotating = False
         self._segment_started_at = time.monotonic()
         self.log("分段完成（%d 字），累计 %d 字，继续听…" % (len(part), len(self._prefix)))
@@ -149,7 +152,7 @@ class App:
 
     def _on_final(self, msg: dict) -> None:
         # 分段过的话，整句 = 已落定前缀 + 最后一段
-        self.final_text = self._prefix + (msg.get("text") or "")
+        self.final_text = smart_join([self._prefix, msg.get("text") or ""])
         self._rotating = False
         self.overlay.set_text(self.final_text)
         stats = {k: v for k, v in msg.items() if k not in ("type", "text")}

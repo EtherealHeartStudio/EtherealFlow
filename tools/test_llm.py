@@ -33,6 +33,9 @@ CORRECTED = "我们今天测试一下这个语音输入法。"
 
 MODE = {"value": "ok"}
 CALLS = {"n": 0}
+# 服务端**实际看到**的请求头。用来验证「本地无 Key 时不发 Authorization」，
+# 这是本地模型路径上最容易出错、又最难靠读代码确认的一点。
+SEEN: dict[str, str | None] = {"auth": None, "get_path": "", "get_auth": None}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -52,8 +55,21 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass          # 客户端主动超时断开是预期行为，不要刷栈
 
+    def do_GET(self):
+        """``GET /v1/models`` —— 本地模型名用户记不住，设置界面靠它拉列表。"""
+        SEEN["get_path"] = self.path
+        SEEN["get_auth"] = self.headers.get("Authorization")
+        if self.path.rstrip("/").endswith("/models"):
+            self._send(200, {"object": "list", "data": [
+                {"id": "fake-model", "object": "model"},
+                {"id": "qwen2.5:7b", "object": "model"},
+            ]})
+            return
+        self._send(404, {"error": {"message": "not found"}})
+
     def do_POST(self):
         CALLS["n"] += 1
+        SEEN["auth"] = self.headers.get("Authorization")
         length = int(self.headers.get("Content-Length") or 0)
         payload = json.loads(self.rfile.read(length).decode("utf-8", "replace"))
         prompt = payload["messages"][-1]["content"]
@@ -197,6 +213,43 @@ def main() -> int:
     out = client.translate(ORIGINAL, "English")
     check("翻译：正常返回并被采用", out.changed and out.text == CORRECTED,
           "text=%r" % out.text)
+
+    # ---------- 本地模型路径 ---------- #
+    # 本地部署（Ollama / LM Studio / llama.cpp / vLLM）通常**不校验** API Key。
+    # 不设 Key 时绝不能发 Authorization 头 —— 有些实现收到 "Bearer " 会直接 401，
+    # 表现成"本地模型连不上"，排查起来毫无头绪。
+    SEEN["auth"] = "未重置"
+    nokey = LlmClient(base_url=base, api_key="", model="fake-model", timeout=5.0)
+    out = nokey.correct(ORIGINAL)
+    check("本地无 Key：不带 Authorization 头且能出结果",
+          out.changed and SEEN["auth"] is None,
+          "服务端看到的 Authorization=%r" % SEEN["auth"])
+
+    # 用户手填地址一定会填出各种写法，每一种都得能用
+    port = srv.server_address[1]
+    for label, raw, want in [
+        ("裸地址（无协议、无 /v1）", "127.0.0.1:%d" % port, "http://127.0.0.1:%d/v1" % port),
+        ("多余尾斜杠", "http://127.0.0.1:%d/v1/" % port, "http://127.0.0.1:%d/v1" % port),
+        ("直接粘完整端点", "http://127.0.0.1:%d/v1/chat/completions" % port,
+         "http://127.0.0.1:%d/v1" % port),
+        ("非标准路径不擅自补 /v1", "http://127.0.0.1:%d/api" % port,
+         "http://127.0.0.1:%d/api" % port),
+    ]:
+        c = LlmClient(base_url=raw, api_key="k", model="fake-model", timeout=5.0)
+        served = c.correct(ORIGINAL).changed if want.endswith("/v1") else True
+        check("地址归一化：%s" % label, c.base_url == want and served,
+              "%r → %r" % (raw, c.base_url))
+
+    # 模型列表 + 测试连接（设置界面的两个按钮靠它们）
+    models = nokey.list_models()
+    check("列出服务端模型", models == ["fake-model", "qwen2.5:7b"], repr(models))
+    check("列模型走的是正确的路径", SEEN["get_path"].endswith("/v1/models"),
+          SEEN["get_path"])
+    okc, msg = nokey.test_connection()
+    check("测试连接：成功且指出找到了模型", okc and "已找到" in msg, msg)
+    wrong = LlmClient(base_url=base, api_key="", model="拼错的模型名", timeout=5.0)
+    okc2, msg2 = wrong.test_connection()
+    check("测试连接：模型名写错要明确指出来", okc2 and "没找到" in msg2, msg2)
 
     srv.shutdown()
     print("=" * 74)

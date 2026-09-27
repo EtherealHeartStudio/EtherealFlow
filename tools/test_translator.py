@@ -24,8 +24,32 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from client.llm import Outcome                      # noqa: E402
+from client.textutil import needs_space, smart_join  # noqa: E402
 from client.translator import (IncrementalTranslator, guess_target_language,  # noqa: E402
                                last_sentence_end)
+
+
+class FakeEnglishLlm:
+    """返回**英文**译文，用来验证分段拼接会不会把句子粘在一起。
+
+    这个用例是补出来的：原来的 FakeLlm 返回 ``<原文>``，尖括号让它
+    天然带边界，所以 ``"".join()`` 的 bug 在离线测试里完全看不出来，
+    一直到真机联调出英文才现形（``afternoon.Discuss``）。
+    """
+
+    TABLE = {
+        "今天下午三点开会。": "We'll meet at 3 p.m.",
+        "讨论新版本。": "Let's discuss the new version.",
+        "然后吃饭。": "Then we'll eat.",
+    }
+
+    def __init__(self) -> None:
+        self.sources: list[str] = []
+
+    def translate(self, text: str, target: str = "English") -> Outcome:
+        self.sources.append(text)
+        return Outcome(text=self.TABLE.get(text.strip(), "?" + text.strip()),
+                       changed=True)
 
 
 class FakeLlm:
@@ -67,6 +91,26 @@ def main() -> int:
     check("方向自动判断：英文 → Chinese",
           guess_target_language("hello world") == "Chinese",
           guess_target_language("hello world"))
+
+    # ---------- 拼接（真机联调踩到的坑） ---------- #
+    check("英文句末 + 英文句首 → 补空格",
+          smart_join(["We'll meet at 3 p.m.", "Let's discuss."])
+          == "We'll meet at 3 p.m. Let's discuss.",
+          repr(smart_join(["We'll meet at 3 p.m.", "Let's discuss."])))
+    check("中文之间不补空格",
+          smart_join(["会议在下午三点。", "讨论新版本。"]) == "会议在下午三点。讨论新版本。",
+          repr(smart_join(["会议在下午三点。", "讨论新版本。"])))
+    check("片段自带首尾空格时不重复补",
+          smart_join(["hello ", "world"]) == "hello world",
+          repr(smart_join(["hello ", "world"])))
+    check("右段以标点开头时不补空格",
+          smart_join(["hello", ", world"]) == "hello, world",
+          repr(smart_join(["hello", ", world"])))
+    check("空片段被跳过",
+          smart_join(["", "abc", ""]) == "abc", repr(smart_join(["", "abc", ""])))
+    check("needs_space 判据是 ASCII 边界而不是语种标签",
+          needs_space("abc", "def") and not needs_space("abc。", "def"),
+          "%s / %s" % (needs_space("abc", "def"), needs_space("abc。", "def")))
 
     # ---------- 句末标点触发 ---------- #
     llm = FakeLlm()
@@ -157,6 +201,24 @@ def main() -> int:
     res6 = tr6.finish("")
     check("空输入不崩、不调用 LLM", res6.calls == 0 and res6.text == "",
           "calls=%d text=%r" % (res6.calls, res6.text))
+
+    # ---------- 英文分段拼接（离线复现真机的 afternoon.Discuss） ---------- #
+    en = FakeEnglishLlm()
+    tr7 = IncrementalTranslator(en, target_language="English", silence_sec=0.3,
+                                chunk_chars=999)
+    tr7.start()
+    tr7.update("今天下午三点开会。")
+    time.sleep(0.5)
+    tr7.update("今天下午三点开会。讨论新版本。")
+    time.sleep(0.5)
+    res7 = tr7.finish("今天下午三点开会。讨论新版本。然后吃饭。")
+    check("英文多段拼接：句子之间有空格",
+          "p.m. Let's" in res7.text, repr(res7.text))
+    check("英文多段拼接：没有粘成一坨",
+          ".L" not in res7.text and ".T" not in res7.text, repr(res7.text))
+    check("已落定段不被重译（段数 == 调用次数）",
+          len(res7.segments) == len(en.sources) and len(en.sources) >= 2,
+          "段=%d 调用=%d %s" % (len(res7.segments), len(en.sources), en.sources))
 
     print("=" * 74)
     print("P4 验证：增量流式翻译")

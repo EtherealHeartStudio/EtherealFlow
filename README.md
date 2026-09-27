@@ -64,7 +64,9 @@ EtherealFlow 是**边说边出**：
 - **识别不需要 API Key、不需要按量计费**：模型权重在本地，说多少句都一样。
 - **可换成你自己的 ASR**：客户端只认一个 WebSocket 协议（见 [docs/protocol.md](docs/protocol.md)），
   想接自研/私有的识别引擎，改服务端即可。
-- 唯一的例外是**可选的**大模型修正/翻译 —— 那一步会调用你配置的 LLM 接口（默认关闭）。
+- 大模型修正/翻译是**可选**的（默认关闭）。它同样可以跑在**你自己的机器上**
+  （Ollama / LM Studio / llama.cpp server / vLLM），也可以接任意 OpenAI 兼容的云端接口 ——
+  见 [五之 5. 接一个大模型](#5-接一个大模型修正与翻译)。
 
 > ⚠️ **模型权重需自行获取**：本仓库不分发权重（GB 级）。
 > 识别引擎为 [Confucius4-R2T2](https://github.com/netease-youdao/Confucius4-R2T2)（网易有道），
@@ -82,8 +84,9 @@ EtherealFlow 是**边说边出**：
 | 长语音自动分段（避免长音频解码跟不上实时） | ✅ |
 | 断线自动重连 / 服务崩溃自动恢复 | ✅ |
 | 设置界面（热键 / 识别 / 修正 / 翻译 / 注入 / 词典） | ✅ |
-| LLM 整段修正 | 🟡 引擎完成，待接真实模型验证 |
-| 流式双语翻译（原文/译文并行、只翻译新增部分） | 🟡 引擎完成，待接真实模型验证 |
+| **LLM 整段修正**（去口水词 / 补标点 / 纠同音错别字 / 数字规范化） | ✅ 已接真实模型实测 |
+| **流式双语翻译**（原文/译文并行、只翻译新增部分、已落定段永不重译） | ✅ 已接真实模型实测 |
+| 任意 OpenAI 兼容接口（本机 Ollama / LM Studio / llama.cpp / vLLM / 云端） | ✅ 含预设、模型列表、连接自检 |
 
 ## 四、实测性能（RTX 4070 Laptop / WSL2）
 
@@ -127,11 +130,50 @@ python -m venv .venv
 
 设置界面：`python -m client.app --settings`
 
-### 4. 自测（不需要人按键、不需要说话、不需要 API Key）
+### 4. 自测
 
 ```bash
-python tools\run_all_tests.py        # 一键跑完 10 个测试
+python tools\run_all_tests.py        # 一键跑完 11 个测试
 python tools\check_release.py        # 发布前安全检查
+```
+
+其中绝大多数**不需要人按键、不需要说话、不需要 API Key**。
+需要真实环境的几项会自己报 `[SKIP]` 并说明原因，不会伪装成通过。
+
+### 5. 接一个大模型（修正与翻译）
+
+**可选**，默认关闭。开启后松手的那一步会多一次 LLM 调用：去口水词、补标点、纠同音错别字、
+数字规范化；或按你的设置直接**翻译**后提交译文。
+
+打开设置界面 → **修正**页 → 先用「快速预设」选一个，再点「测试连接」：
+
+| 场景 | 预设 | 说明 |
+|---|---|---|
+| **完全本地**（推荐） | 本地 · Ollama | 需先 `ollama serve` 并 `ollama pull qwen2.5:7b` |
+| **完全本地** | 本地 · LM Studio | 在软件里加载模型并启动本地服务器 |
+| **完全本地** | 本地 · llama.cpp server / vLLM | 填它们监听的地址即可 |
+| 云 端 | OpenAI / DeepSeek / Kimi / 智谱 / 通义 / 硅基流动 | 选预设后只需要再粘一个 API Key |
+
+几个实测出来的要点：
+
+- **本机服务不需要 API Key**，留空即可；填了反而可能被某些实现拒掉。
+  客户端在不填 Key 时**不会**发送 `Authorization` 头。
+- **地址怎么填都行**：`http://localhost:11434`、`http://localhost:1234/v1/`、
+  甚至直接粘贴 `http://localhost:8080/v1/chat/completions`，都会自动归一化。
+- **「测试连接」会把服务端的模型列表拉下来**填进下拉框 —— 本机模型名
+  （`qwen2.5:7b`、`llama-3.2-3b-instruct`）没人记得住，不用手打。
+- **超时**默认 15 秒。本机小模型第一次调用要加载权重，慢的话把它调大。
+- **LLM 挂了不会影响使用**：客户端按失败原因分类处理 ——
+  **Key 错/连不上**会明确提示你去改配置；**超时/限流/5xx** 静默降级，
+  直接注入识别原文。绝不会因为模型不可用就丢了你刚说的话。
+
+命令行自测（会真的调用模型）：
+
+```bash
+python tools\test_llm_live.py --list-models        # 看看服务端有哪些模型
+python tools\test_llm_live.py                      # 跑修正/翻译用例
+python tools\test_llm_live.py --ui                 # 验证设置界面的「测试连接」按钮
+python tools\test_llm_live.py --base-url http://localhost:11434/v1 --model qwen2.5:7b
 ```
 
 ## 六、架构
@@ -153,19 +195,30 @@ Windows 客户端                     WSL 识别服务
 而热键/麦克风/悬浮窗/注入又是 Windows 独有的能力。两边靠 WSL2 的 localhost 转发连接。
 细节见 [docs/architecture.md](docs/architecture.md)。
 
-## 七、后期开发计划
+## 七、开发计划
 
-### v0.2 —— 接入真实大模型：**文字修正**与**翻译**
+### v0.2 —— 接入真实大模型 ✅ 已完成（当前版本）
 
-目前这两个引擎的代码已经写好并通过离线自测（用本地假服务端验证了失败分类、输出校验、
-增量翻译的三种触发条件），**但还没接过真实模型**，默认关闭。v0.2 要做的是：
+v0.1 时这两个引擎的代码已写好并通过离线自测（用本地假服务端验证失败分类、输出校验、
+增量翻译的触发条件），但**还没接过真实模型**。v0.2 把它接到了真模型上：
 
-- 接入任意 OpenAI 兼容接口（本地 Ollama / vLLM / 云端皆可），端到端调优
-- **文字修正**：去口水词（嗯/啊/那个）、补标点、纠正同音错别字、数字规范化
-- **流式翻译**：原文与译文并行滚动，按句末标点/静默 1.5 s/长度阈值触发，
+- ✅ 接入任意 OpenAI 兼容接口，本机（Ollama / LM Studio / llama.cpp server / vLLM）
+  与云端一视同仁；设置界面提供预设、模型列表下拉、连接自检
+- ✅ **文字修正**：去口水词（嗯/啊/那个）、补标点、纠正同音错别字、数字规范化
+- ✅ **流式翻译**：原文与译文并行滚动，按句末标点/静默 1.5 s/长度阈值触发，
   **已落定的段落永不重译**
-- 失败降级：认证/连接错误 → 提示改配置；超时/限流 → 静默回退识别原文
-- 默认开启，并提供中文/英文/代码注释等预设 Prompt
+- ✅ 失败降级：认证/连接错误 → 提示改配置；超时/限流/5xx → 静默回退识别原文
+- ✅ 真机自测工具 `tools/test_llm_live.py`（含设置界面「测试连接」的验证）
+
+真机实测（同一台 RTX 4070 Laptop，模型为云端 OpenAI 兼容接口）：
+
+| 用例 | 结果 | 耗时 |
+|---|---|---|
+| 「嗯那个我们今天就是测试一下这个语音输入法看看它能不能把口水词去掉」 | →「我们今天测试一下这个语音输入法，看看它能不能把口水词去掉。」 | 2.0 s |
+| 「我们要用快首科技的产品」＋热词「快手科技」 | →「我们要用快手科技的产品来做这个项目。」 | 2.0 s |
+| 「这个项目大概要三个月时间预算二十万左右」 | →「这个项目大概要 3 个月时间，预算 20 万左右。」 | 1.1 s |
+| 「帮我把这个 API 的 end point 改成那个 post 请求」 | →「帮我把这个 API 的 endpoint 改成 POST 请求。」 | 1.8 s |
+| 整段中译英 | → 通顺英文，要点齐全 | 1.1 s |
 
 ### v0.3 —— 打包与易用性
 
@@ -248,8 +301,9 @@ both meanings — **flow** (the psychology concept, 心流) and **streaming** (�
 | Automatic long-utterance segmentation | ✅ |
 | Auto reconnect / auto recovery after the service crashes | ✅ |
 | Settings UI | ✅ |
-| LLM text correction | 🟡 engine done, awaiting a real model |
-| Streaming bilingual translation | 🟡 engine done, awaiting a real model |
+| **LLM text correction** (de-filler, punctuation, homophones, number normalisation) | ✅ tested against a real model |
+| **Streaming bilingual translation** (finalised segments are never re-translated) | ✅ tested against a real model |
+| Any OpenAI-compatible endpoint (local Ollama / LM Studio / llama.cpp / vLLM / cloud) | ✅ presets, model list, connection check |
 
 ## Measured performance (RTX 4070 Laptop / WSL2)
 
@@ -280,14 +334,45 @@ python -m venv .venv
 Settings: `python -m client.app --settings` ·
 Self-tests (no keypress, no speech, no API key needed): `python tools\run_all_tests.py`
 
+### Optional: connect an LLM for correction / translation
+
+Off by default. Open **Settings → 修正 (Correction)**, pick a preset, hit **测试连接 (Test connection)**:
+
+| Scenario | Preset | Note |
+|---|---|---|
+| **Fully local** (recommended) | Local · Ollama | run `ollama serve` and `ollama pull qwen2.5:7b` first |
+| **Fully local** | Local · LM Studio | load a model in the app and start its local server |
+| **Fully local** | Local · llama.cpp server / vLLM | just point at the address they listen on |
+| Cloud | OpenAI / DeepSeek / Kimi / GLM / Qwen / SiliconFlow | pick a preset, then paste an API key |
+
+Things we learned the hard way:
+
+- Local servers need **no API key** — leave it blank. The client sends no `Authorization`
+  header at all when the key is empty.
+- **Any reasonable address works**: `http://localhost:11434`, `http://localhost:1234/v1/`, or even a
+  pasted `http://localhost:8080/v1/chat/completions` — all normalised automatically.
+- **Test connection** pulls the server's model list into the dropdown, so you never have to
+  remember names like `qwen2.5:7b`.
+- **A broken LLM never costs you a sentence**: auth/connection problems tell you to fix the config;
+  timeouts / rate limits / 5xx silently fall back to injecting the raw transcript.
+
+```bash
+python tools\test_llm_live.py --list-models     # what models does the endpoint offer?
+python tools\test_llm_live.py                   # run the correction/translation cases
+python tools\test_llm_live.py --ui              # verify the Settings "Test connection" button
+```
+
 ## Roadmap
 
-**v0.2 — connect a real LLM: text correction and translation.**
-Both engines already exist in code and pass offline tests, but have never been pointed at a real
-model, so they ship disabled. v0.2 wires them to any OpenAI-compatible endpoint (local Ollama /
-vLLM / cloud), adds end-to-end tuning, and enables: des-stuttering (嗯/啊/那个), punctuation,
-homophone fixes, number normalisation, and **streaming translation** where the original and the
-translation scroll side by side and already-finalised segments are never re-translated.
+**v0.2 — connect a real LLM: text correction and translation. ✅ Done (current release).**
+v0.1 already shipped both engines in code, passing offline tests, but they had never been pointed at a
+real model — so they shipped disabled. v0.2 wires them to real models: any OpenAI-compatible endpoint,
+local (Ollama / LM Studio / llama.cpp server / vLLM) or cloud, with presets, a model-list dropdown and
+a connection check in Settings. Correction does de-stuttering (嗯/啊/那个), punctuation, homophone
+fixes and number normalisation; **streaming translation** scrolls the original and the translation
+side by side and never re-translates an already-finalised segment. A broken LLM never costs you a
+sentence: auth/connection errors tell you to fix the config, while timeouts, rate limits and 5xx
+silently fall back to the raw transcript.
 
 **v0.3 — packaging and ergonomics.** One-click installer, autostart + tray icon, richer overlay.
 **Longer term.** More recognition languages (the model already supports several), and
