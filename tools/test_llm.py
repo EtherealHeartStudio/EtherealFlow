@@ -88,6 +88,18 @@ class Handler(BaseHTTPRequestHandler):
             time.sleep(3.0)
             self._send(200, self._ok("慢死了"))
             return
+        if mode == "truncated":
+            # 推理模型的真实形态：思考把 max_tokens 花光，content 为空、
+            # 只有 reasoning_content，finish_reason=length
+            self._send(200, {
+                "id": "chatcmpl-test", "object": "chat.completion",
+                "created": int(time.time()), "model": "fake-model",
+                "choices": [{"index": 0, "finish_reason": "length",
+                             "message": {"role": "assistant", "content": "",
+                                         "reasoning_content": "我们需要回答用户。" * 40}}],
+                "usage": {"total_tokens": 42, "completion_tokens_details":
+                          {"reasoning_tokens": 1024}}})
+            return
 
         # 从 prompt 里把原文抠出来（热词在「原文：」之前，硬约束在其后）
         tail = prompt.split("原文：")[-1].lstrip("\n")
@@ -155,6 +167,106 @@ def main() -> int:
           validate_output(ORIGINAL, ORIGINAL) == ORIGINAL, "OK")
 
     # ---------- 端到端：各种故障 ---------- #
+    # ---------- 修正模式（三种内置 + 自定义） ---------- #
+    from client.config import DEFAULT_CONFIG
+    from client.correction_modes import (BUILTIN_MODES, DEFAULT_MODE_ID,
+                                         all_modes, delete_mode,
+                                         effective_prompt, find_mode, new_mode,
+                                         postprocess, prompt_is_overridden,
+                                         resolve_mode, strip_trailing_period,
+                                         upsert_mode)
+
+    cfg0 = json.loads(json.dumps(DEFAULT_CONFIG["llm"]))
+    ids = [m["id"] for m in all_modes(cfg0)]
+    check("内置三个修正模式齐全且顺序固定",
+          ids == ["none", "light", "deep"], "%s" % ids)
+    check("每个内置模式都有名称/说明/示例/Prompt",
+          all(m.get(k) for m in BUILTIN_MODES for k in
+              ("name", "desc", "example", "prompt")),
+          "%s" % [m["name"] for m in BUILTIN_MODES])
+    check("默认模式是轻度整理", resolve_mode(cfg0)["id"] == DEFAULT_MODE_ID,
+          resolve_mode(cfg0)["name"])
+
+    # 力度必须是**递增**的：三个模式的 Prompt 不能是同一份，否则等于没得选
+    prompts = {m["id"]: m["prompt"] for m in BUILTIN_MODES}
+    check("三个模式的 Prompt 互不相同",
+          len(set(prompts.values())) == 3, "去重后 %d 份" % len(set(prompts.values())))
+    check("「不整理」明确要求不要加标点/不要删口水词",
+          "不要加标点" in prompts["none"] and "不要删口水词" in prompts["none"],
+          "见 none 模式 Prompt")
+    check("「轻度整理」要求保留措辞",
+          "保留用户原本的措辞" in prompts["light"], "见 light 模式 Prompt")
+    check("「深度整理」禁止添加原文没有的内容",
+          "不得添加原文没有" in prompts["deep"], "见 deep 模式 Prompt")
+
+    # id 对不上（自定义模式被删、手改配置写错）必须回退，不能崩
+    bad = dict(cfg0, mode="不存在的模式")
+    check("模式 id 无效时回退到默认模式",
+          resolve_mode(bad)["id"] == DEFAULT_MODE_ID, resolve_mode(bad)["name"])
+
+    # 自定义模式
+    mine = new_mode(cfg0, "邮件体", "整理成邮件语气",
+                    "把下面的话整理成邮件语气。\n\n{hotwords}原文：\n{text}",
+                    "您好，关于明天会议…")
+    check("新建自定义模式有唯一 id", mine["id"] and mine["id"] not in ids, mine["id"])
+    cfg1 = dict(cfg0)
+    upsert_mode(cfg1, mine)
+    check("自定义模式能出现在模式列表里",
+          [m["id"] for m in all_modes(cfg1)] == ids + [mine["id"]],
+          "%s" % [m["name"] for m in all_modes(cfg1)])
+    cfg1["mode"] = mine["id"]
+    check("能把自定义模式设为当前模式",
+          resolve_mode(cfg1)["name"] == "邮件体", resolve_mode(cfg1)["name"])
+    check("自定义模式的 Prompt 生效",
+          effective_prompt(cfg1) == mine["prompt"], effective_prompt(cfg1)[:30])
+
+    dup = new_mode(cfg1, "邮件体", prompt="x")
+    check("重名会生成不同的 id（不会覆盖）", dup["id"] != mine["id"], dup["id"])
+    check("内置模式删不掉", delete_mode(cfg1, "light") is False, "light")
+    check("删掉当前自定义模式后自动回退默认",
+          delete_mode(cfg1, mine["id"]) and cfg1["mode"] == DEFAULT_MODE_ID,
+          "mode=%s" % cfg1["mode"])
+    check("坏数据不会让程序崩（自定义模式里混入垃圾）",
+          [m["id"] for m in all_modes({"modes": [None, 5, {}, {"name": "只有名字"}]})]
+          == ids,
+          "垃圾项被忽略")
+
+    # llm.prompt 是高级后门：非空则完全覆盖所选模式
+    cfg2 = dict(cfg0, prompt="我自己写的 Prompt {text}")
+    check("手写 Prompt 覆盖模式 Prompt",
+          effective_prompt(cfg2) == "我自己写的 Prompt {text}", effective_prompt(cfg2))
+    check("覆盖状态可被界面查询到", prompt_is_overridden(cfg2) is True, "")
+
+    # 结尾句号
+    check("去掉结尾中文句号", strip_trailing_period("你好。") == "你好",
+          repr(strip_trailing_period("你好。")))
+    check("去掉结尾英文句号（含多余空格）",
+          strip_trailing_period("hello.  ") == "hello",
+          repr(strip_trailing_period("hello.  ")))
+    check("只去句号，不动问号/感叹号",
+          strip_trailing_period("你好？") == "你好？"
+          and strip_trailing_period("你好！") == "你好！",
+          repr(strip_trailing_period("你好？")))
+    check("句中句号不动", strip_trailing_period("你好。再见") == "你好。再见",
+          repr(strip_trailing_period("你好。再见")))
+    check("全是句号时不返回空串", strip_trailing_period("。。。") != "",
+          repr(strip_trailing_period("。。。"))[:20])
+    check("开关关闭时不做后处理",
+          postprocess("你好。", {"strip_trailing_period": False}) == "你好。"
+          and postprocess("你好。", {"strip_trailing_period": True}) == "你好",
+          "postprocess")
+
+    # 客户端真的按模式取 Prompt
+    from client.llm import default_client
+    cli_none = default_client(dict(cfg0, mode="none"))
+    cli_deep = default_client(dict(cfg0, mode="deep"))
+    check("客户端按所选模式取 Prompt",
+          cli_none.correct_prompt == prompts["none"]
+          and cli_deep.correct_prompt == prompts["deep"],
+          "%s / %s" % (cli_none.mode_name, cli_deep.mode_name))
+    check("客户端带回模式名（日志里要显示）",
+          cli_none.mode_name == "不整理", cli_none.mode_name)
+
     srv, base = start_server()
     client = LlmClient(base_url=base, api_key="k", model="fake-model", timeout=1.5)
 
@@ -173,6 +285,9 @@ def main() -> int:
         ("429", False, True, False, "rate_limit", "限流 → 静默降级"),
         ("500", False, True, False, "server", "5xx → 静默降级"),
         ("slow", False, True, False, "timeout", "超时 → 静默降级"),
+        ("truncated", False, True, True, "truncated",
+         "推理模型思考吃光 max_tokens → 单独分类并**提示用户**"
+         "（不能报成『输出长度失控』，也不能静默）"),
     ]
     for mode, want_changed, want_deg, want_notify, want_code, label in cases:
         MODE["value"] = mode

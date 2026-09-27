@@ -106,6 +106,56 @@ def main() -> int:
           win.collect()["hotkey"]["keys"] == ["ctrl", "win"],
           "%r" % win.collect()["hotkey"]["keys"])
 
+    # ---------- 修正模式（卡片选择 + 自定义） ---------- #
+    from client.correction_modes import new_mode, upsert_mode
+
+    def cards() -> list:
+        return list(win.cards_frame.winfo_children())
+
+    check("修正页默认画出三张内置模式卡片", len(cards()) == 3, "%d 张" % len(cards()))
+    win._select_mode("deep")
+    check("点卡片能切换当前模式", win.collect()["llm"]["mode"] == "deep",
+          win.collect()["llm"]["mode"])
+    win.vars["llm_strip_period"].set(True)
+    check("「去除结尾句号」能写进配置",
+          win.collect()["llm"]["strip_trailing_period"] is True, "")
+
+    tmp_modes = {"modes": win._modes}
+    mine = new_mode(tmp_modes, "测试模式", "一句话说明", "把 {text} 整理好", "示例")
+    upsert_mode(tmp_modes, mine)
+    win._modes = tmp_modes["modes"]
+    win._rebuild_cards()
+    check("新增自定义模式后多出一张卡片", len(cards()) == 4, "%d 张" % len(cards()))
+    win._select_mode(mine["id"])
+    got_modes = win.collect()
+    check("自定义模式写进配置且被选中",
+          got_modes["llm"]["mode"] == mine["id"]
+          and [x["id"] for x in got_modes["llm"]["modes"]] == [mine["id"]],
+          "mode=%s modes=%s" % (got_modes["llm"]["mode"], got_modes["llm"]["modes"]))
+    check("内置模式不会被写进配置文件（它们在代码里）",
+          all(x["id"] not in ("none", "light", "deep")
+              for x in got_modes["llm"]["modes"]),
+          "%s" % [x["id"] for x in got_modes["llm"]["modes"]])
+
+    tmp2 = Path(tempfile.gettempdir()) / "cv-settings-modes.json"
+    save_config(got_modes, tmp2)
+    back = load_config(tmp2)
+    check("存盘重载后模式与自定义项都还在",
+          back["llm"]["mode"] == mine["id"] and len(back["llm"]["modes"]) == 1,
+          "mode=%s 自定义=%d 条" % (back["llm"]["mode"], len(back["llm"]["modes"])))
+    # 配置里带的**内部标记**不该被写进文件
+    check("写进文件的自定义模式不含内部字段",
+          "custom" not in back["llm"]["modes"][0],
+          "%s" % sorted(back["llm"]["modes"][0]))
+
+    # 模式 id 失效（用户手改了配置）时界面要能兜住
+    broken2 = load_config(tmp2)
+    broken2["llm"]["mode"] = "早就删掉的模式"
+    win.apply(broken2)
+    check("配置里的模式 id 失效时界面不崩且回退默认",
+          win.vars["llm_mode"].get() == "light" and len(cards()) == 4,
+          "当前=%s 卡片=%d" % (win.vars["llm_mode"].get(), len(cards())))
+
     # ---------- 布局回归 ---------- #
     # 断言输入控件**真正长在行 Frame 里**。这条守的是两个都真实发生过的 bug：
     #

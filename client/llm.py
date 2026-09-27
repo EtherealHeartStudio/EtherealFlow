@@ -31,7 +31,10 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from .config import DEFAULT_LLM_TIMEOUT
+from .config import DEFAULT_LLM_MAX_TOKENS, DEFAULT_LLM_TIMEOUT
+from .correction_modes import (BUILTIN_MODES, DEFAULT_MODE_ID,  # noqa: F401
+                               effective_prompt, resolve_mode,
+                               strip_trailing_period)
 
 # --------------------------------------------------------------------------- #
 # 异常分类
@@ -82,21 +85,32 @@ class LlmBadOutputError(LlmError):
     code = "bad_output"
 
 
+class LlmTruncatedError(LlmError):
+    """模型的思考过程吃光了 max_tokens，根本没给出结果。
+
+    这是接真模型时踩到的：``deepseek-flash`` 这类**推理模型**会先把 ``max_tokens``
+    花在内部思考上，预算不够时 ``content`` 是空的、只有 ``reasoning_content``，
+    ``finish_reason`` 是 ``length``。
+
+    如果这时把思考过程当结果交出去，下游只会报「输出长度失控（2460 字 vs 原文 25 字）」
+    —— 用户完全想不到要去调大 ``max_tokens`` 或换个模型。所以这里单独分类，
+    把话说明白。
+
+    ``degrade=False``：这是**用户必须处理**的配置问题（模型选错了，或预算给少了），
+    跟"模型太慢"不是一回事。若按静默降级处理，修正会一声不响地永远失效。
+    """
+    degrade = False
+    code = "truncated"
+
+
 # --------------------------------------------------------------------------- #
 # Prompt（需求文档 §7.2 + 末尾硬约束）
 # --------------------------------------------------------------------------- #
 
-CORRECT_PROMPT = """你是一个文本修正助手。请修正下面这段语音识别结果：
-1. 去除"嗯、啊、那个、就是"等口水词
-2. 补充正确的标点符号
-3. 修正明显的同音错别字
-4. 数字用阿拉伯数字
-5. 保持原意，不要增删内容，不要改写语气
-
-直接输出修正后的文本，不要任何解释。
-
-{hotwords}原文：
-{text}"""
+# 修正 Prompt 现在由**模式**决定（见 client/correction_modes.py）。
+# 这里保留 CORRECT_PROMPT 只是为了让「直接 new 一个 LlmClient」也有个合理默认值，
+# 它**就是**「轻度整理」模式的 Prompt —— 写两份会漂移，所以做成别名。
+CORRECT_PROMPT = next(m["prompt"] for m in BUILTIN_MODES if m["id"] == DEFAULT_MODE_ID)
 
 TRANSLATE_PROMPT = """将下面的文本翻译成{target_language}。只输出译文，不要任何解释。
 
@@ -196,6 +210,7 @@ class Completion:
     model: str = ""
     elapsed_ms: float = 0.0
     usage: dict = field(default_factory=dict)
+    finish_reason: str = ""
 
 
 @dataclass
@@ -205,13 +220,19 @@ class Outcome:
     changed: bool = False         # 是否真的用了模型结果
     degraded: bool = False        # 是否降级为原文
     notify: bool = False          # 是否应该提示用户（配置类问题）
+    no_change: bool = False       # 模型成功了，但判定这句不需要改
     error: str = ""
     code: str = ""
     elapsed_ms: float = 0.0
+    mode: str = ""                # 用的哪个修正模式（仅修正有）
 
     def describe(self) -> str:
         if self.changed:
             return "已修正（%.0f ms）" % self.elapsed_ms
+        if self.no_change:
+            # 和"降级"是两件事：模型的答案是"这句不用改"，不是"模型没用上"。
+            # 不区分的话，选「不整理」时用户会看到满屏"降级"，以为配置坏了。
+            return "无需改动（%.0f ms）" % self.elapsed_ms
         if self.degraded:
             return "降级为原文（%s，%.0f ms）" % (self.code or "error", self.elapsed_ms)
         return "未改动"
@@ -284,9 +305,11 @@ def validate_output(original: str, output: str,
 class LlmClient:
     def __init__(self, base_url: str = "http://127.0.0.1:8317/v1",
                  api_key: str = "", model: str = "",
-                 timeout: float = DEFAULT_LLM_TIMEOUT, max_tokens: int = 1024,
+                 timeout: float = DEFAULT_LLM_TIMEOUT, max_tokens: int = DEFAULT_LLM_MAX_TOKENS,
                  correct_prompt: str = CORRECT_PROMPT,
-                 translate_prompt: str = TRANSLATE_PROMPT) -> None:
+                 translate_prompt: str = TRANSLATE_PROMPT,
+                 strip_trailing_period: bool = False,
+                 mode_name: str = "") -> None:
         self.base_url = normalize_base_url(base_url)
         self.api_key = api_key or ""
         self.model = model or ""
@@ -294,6 +317,8 @@ class LlmClient:
         self.max_tokens = int(max_tokens)
         self.correct_prompt = correct_prompt
         self.translate_prompt = translate_prompt
+        self.strip_trailing_period = bool(strip_trailing_period)
+        self.mode_name = mode_name or ""
         self.last_error = ""
 
     # -- 底层 -------------------------------------------------------------- #
@@ -350,15 +375,25 @@ class LlmClient:
         try:
             choice = (payload.get("choices") or [{}])[0]
             message = choice.get("message") or {}
+            finish = str(choice.get("finish_reason") or "")
             text = message.get("content") or ""
             if not text:
-                # 有些模型把内容放在 reasoning_content（OpenTypeless 的兜底）
-                text = message.get("reasoning_content") or ""
+                # 有些模型把内容放在 reasoning_content。但**预算被思考吃光**时
+                # 那里装的是自言自语，绝不能当成结果 —— 否则注入到用户输入框里的
+                # 会是一段"我们需要回答用户…"。这种情况单独报错，把原因说清楚。
+                reasoning = message.get("reasoning_content") or ""
+                if reasoning and finish == "length":
+                    raise LlmTruncatedError(
+                        "模型的思考过程用完了 max_tokens（%d），没能给出结果。"
+                        "把 max_tokens 调大，或换一个非推理模型。"
+                        % self.max_tokens)
+                text = reasoning
         except (AttributeError, IndexError, TypeError) as exc:
             raise LlmServerError("返回结构不符合 OpenAI 规范") from exc
 
         return Completion(text=text, model=payload.get("model", self.model),
-                          elapsed_ms=elapsed, usage=payload.get("usage") or {})
+                          elapsed_ms=elapsed, usage=payload.get("usage") or {},
+                          finish_reason=finish)
 
     def list_models(self) -> list[str]:
         """列出服务端可用模型（OpenAI 兼容 ``GET /v1/models``）。
@@ -468,8 +503,12 @@ class LlmClient:
             return Outcome(text=original, degraded=True, error=str(exc),
                            code=exc.code, elapsed_ms=comp.elapsed_ms)
         changed = text.strip() != (original or "").strip()
+        # degraded 与 no_change 都置位是**有意**的：
+        #   * translator 靠 degraded 判断"这段没译出来"（原样返回等于没翻），语义不能变；
+        #   * 修正这边靠 no_change 区分"模型说不用改"和"模型没用上"，日志才不误导。
         return Outcome(text=text, changed=changed,
-                       degraded=not changed, elapsed_ms=comp.elapsed_ms)
+                       degraded=not changed, no_change=not changed,
+                       elapsed_ms=comp.elapsed_ms, mode=self.mode_name)
 
     def _build_prompt(self, template: str, hotwords: Optional[list[str]],
                       **kwargs: Any) -> str:
@@ -501,7 +540,15 @@ class LlmClient:
         if not text.strip():
             return Outcome(text=text, degraded=True, error="原文为空", code="empty")
         prompt = self._build_prompt(self.correct_prompt, hotwords, text=text)
-        return self._run(prompt + PLAIN_TEXT_SUFFIX, text, hotwords)
+        outcome = self._run(prompt + PLAIN_TEXT_SUFFIX, text, hotwords)
+        if self.strip_trailing_period and outcome.text.strip():
+            stripped = strip_trailing_period(outcome.text)
+            if stripped != outcome.text:
+                outcome.text = stripped
+                outcome.changed = stripped.strip() != (text or "").strip()
+                outcome.degraded = not outcome.changed
+                outcome.no_change = not outcome.changed
+        return outcome
 
     def translate(self, text: str, target_language: str = "English") -> Outcome:
         if not text.strip():
@@ -512,11 +559,15 @@ class LlmClient:
 
 
 def default_client(cfg: Optional[dict] = None) -> LlmClient:
+    """按配置组装客户端。修正 Prompt 由**当前模式**决定（内置或用户自定义）。"""
     cfg = cfg or {}
+    mode = resolve_mode(cfg)
     return LlmClient(base_url=cfg.get("base_url", "http://127.0.0.1:8317/v1"),
                      api_key=cfg.get("api_key", ""),
                      model=cfg.get("model", ""),
                      timeout=cfg.get("timeout", DEFAULT_LLM_TIMEOUT),
-                     max_tokens=cfg.get("max_tokens", 1024),
-                     correct_prompt=cfg.get("prompt") or CORRECT_PROMPT,
-                     translate_prompt=cfg.get("translate_prompt") or TRANSLATE_PROMPT)
+                     max_tokens=cfg.get("max_tokens", DEFAULT_LLM_MAX_TOKENS),
+                     correct_prompt=effective_prompt(cfg, mode),
+                     translate_prompt=cfg.get("translate_prompt") or TRANSLATE_PROMPT,
+                     strip_trailing_period=bool(cfg.get("strip_trailing_period")),
+                     mode_name=mode["name"])

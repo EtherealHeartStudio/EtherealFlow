@@ -21,6 +21,11 @@ APP_NAME = "EtherealFlow"
 # 8 秒偏紧；而超时只会**静默降级为识别原文**，所以宁可比模型慢一点，也别把结果丢了。
 DEFAULT_LLM_TIMEOUT = 15.0
 
+#: 单次生成的 token 上限。**必须把推理模型的思考量算进去** —— 推理模型会先花
+#: max_tokens 做内部思考再产出答案，给 1024 时思考就把预算吃光了，content 为空，
+#: 用户看到的现象是"修正一直失败"（详见 llm.LlmTruncatedError）。
+DEFAULT_LLM_MAX_TOKENS = 4096
+
 DEFAULT_CONFIG: dict[str, Any] = {
     "hotkey": {"keys": ["ctrl", "win"], "backend": "polling", "swallow": True},
     "asr": {"url": "ws://127.0.0.1:18300", "language": None, "context": "",
@@ -32,10 +37,21 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "base_url": "http://127.0.0.1:8317/v1",
         "api_key": "",
         "model": "",
+        # 修正力度：none（不整理）/ light（轻度整理）/ deep（深度整理），
+        # 也可以是用户自定义模式的 id。见 client/correction_modes.py
+        "mode": "light",
+        # 很多人说话是接着上一句说的，硬补一个结尾句号反而碍事
+        "strip_trailing_period": False,
+        # 用户自己新增的修正模式：[{id, name, desc, prompt, example}]
+        "modes": [],
         # 本机小模型第一次调用要加载权重，8 秒偏紧；15 秒是「够用又不至于让人干等」的折中。
         # 超时会静默降级为识别原文，所以宁可比模型慢一点，也别把结果丢了。
         "timeout": DEFAULT_LLM_TIMEOUT,
-        "max_tokens": 1024,
+        # 4096 不是随手写的：deepseek-flash 这类**推理模型**会先把 max_tokens 花在
+        # 内部思考上，1024 时思考就吃光了预算、content 为空，表现成"修正永远失败"。
+        # 修正本身的输出很短，但思考可能很长，所以预算要按思考+答案一起给。
+        "max_tokens": DEFAULT_LLM_MAX_TOKENS,
+        # 非空 = 完全覆盖所选模式的 Prompt（高级后门，界面上会提示）
         "prompt": "",
         "translate_prompt": "",
     },

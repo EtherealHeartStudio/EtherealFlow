@@ -192,10 +192,15 @@ class App:
     def _correct_and_inject(self) -> None:
         """松手之后的第二步：LLM 修正 → 注入。失败按分类降级。"""
         outcome = self.llm.correct(self.final_text, hotwords=self.hotwords)
+        tag = "［%s］" % outcome.mode if outcome.mode else ""
         if outcome.changed:
-            self.log("修正后：%s（%.0f ms）" % (outcome.text, outcome.elapsed_ms))
+            self.log("修正后%s：%s（%.0f ms）" % (tag, outcome.text, outcome.elapsed_ms))
         elif outcome.notify:
             self.log("⚠ LLM 配置有问题，本次直接注入识别原文：%s" % outcome.error)
+        elif outcome.no_change:
+            # 和"降级"不是一回事：模型答的是"这句不用改"。选「不整理」时这是常态。
+            self.log("%s模型判定无需改动，注入识别原文（%.0f ms）"
+                     % (tag, outcome.elapsed_ms))
         else:
             self.log("LLM 未改动/已降级（%s），注入识别原文" % (outcome.code or "no-change"))
         self.overlay.set_text(outcome.text)

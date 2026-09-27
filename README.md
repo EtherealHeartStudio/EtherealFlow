@@ -85,6 +85,9 @@ EtherealFlow 是**边说边出**：
 | 断线自动重连 / 服务崩溃自动恢复 | ✅ |
 | 设置界面（热键 / 识别 / 修正 / 翻译 / 注入 / 词典） | ✅ |
 | **LLM 整段修正**（去口水词 / 补标点 / 纠同音错别字 / 数字规范化） | ✅ 已接真实模型实测 |
+| **三种修正力度**（不整理 / 轻度整理 / 深度整理，卡片式选择） | ✅ |
+| **自定义修正模式**（自己起名、写说明与 Prompt，与内置模式同等对待） | ✅ |
+| 去除结尾句号（接着说下一句时不被硬塞句号） | ✅ |
 | **流式双语翻译**（原文/译文并行、只翻译新增部分、已落定段永不重译） | ✅ 已接真实模型实测 |
 | 任意 OpenAI 兼容接口（本机 Ollama / LM Studio / llama.cpp / vLLM / 云端） | ✅ 含预设、模型列表、连接自检 |
 
@@ -142,10 +145,31 @@ python tools\check_release.py        # 发布前安全检查
 
 ### 5. 接一个大模型（修正与翻译）
 
-**可选**，默认关闭。开启后松手的那一步会多一次 LLM 调用：去口水词、补标点、纠同音错别字、
-数字规范化；或按你的设置直接**翻译**后提交译文。
+**可选**，默认关闭。开启后松手的那一步会多一次 LLM 调用：按你选的**修正模式**
+处理，或按你的设置直接**翻译**后提交译文。
 
-打开设置界面 → **修正**页 → 先用「快速预设」选一个，再点「测试连接」：
+#### 修正模式：同一句话，三种力度
+
+「修正」不该只有一种力度。只想改错别字的人，被模型重写一遍会很恼火；
+而要发出去的文字，又确实需要整理。所以内置三种，**点卡片选择**：
+
+| 模式 | 做法 | 同一句的效果 |
+|---|---|---|
+| **不整理** | 只修明显的识别错误，其余一字不动 | 嗯我跟你说明天**会议**吧不对不对先讨论排期再聊产品方案 |
+| **轻度整理** | 去口水词与自我修正、补标点，**保留措辞** | 我跟你说，先讨论排期，再聊产品方案。 |
+| **深度整理** | 保留原意，整理成书面表达 | 我跟你说，先讨论排期，再聊产品方案。 |
+
+（原文：`嗯我跟你说明天回议吧不对不对先讨论排期再聊产品方案`）
+
+另外有个**去除结尾句号**的开关：很多人说话是接着上一句说的，系统硬补一个句号反而碍事。
+
+**也可以自己加模式**：点「新增模式」，填名称、一句话说明、示例和 Prompt
+（用 `{text}` 表示识别原文）。自定义模式与内置模式在界面上完全同等对待。
+想改成你习惯的写法，不必去动内置的三个 —— 它们是产品的默认行为。
+
+#### 接入模型
+
+打开设置界面 → **修正**页 → 先用「模型接入」选一个预设，再点「测试连接」：
 
 | 场景 | 预设 | 说明 |
 |---|---|---|
@@ -162,9 +186,12 @@ python tools\check_release.py        # 发布前安全检查
   甚至直接粘贴 `http://localhost:8080/v1/chat/completions`，都会自动归一化。
 - **「测试连接」会把服务端的模型列表拉下来**填进下拉框 —— 本机模型名
   （`qwen2.5:7b`、`llama-3.2-3b-instruct`）没人记得住，不用手打。
+- **尽量选非推理（instruct）模型**：推理模型会先花时间"思考"，实测修一句话要
+  6–18 秒；本机 7B instruct 通常在 1 秒内。差别非常明显。
 - **超时**默认 15 秒。本机小模型第一次调用要加载权重，慢的话把它调大。
 - **LLM 挂了不会影响使用**：客户端按失败原因分类处理 ——
-  **Key 错/连不上**会明确提示你去改配置；**超时/限流/5xx** 静默降级，
+  **Key 错/连不上**会明确提示你去改配置；**推理模型把预算花光**会单独报出来
+  （提示调大 `max_tokens` 或换模型）；**超时/限流/5xx** 静默降级，
   直接注入识别原文。绝不会因为模型不可用就丢了你刚说的话。
 
 命令行自测（会真的调用模型）：
@@ -197,7 +224,7 @@ Windows 客户端                     WSL 识别服务
 
 ## 七、开发计划
 
-### v0.2 —— 接入真实大模型 ✅ 已完成（当前版本）
+### v0.2 —— 接入真实大模型 ✅ 已完成
 
 v0.1 时这两个引擎的代码已写好并通过离线自测（用本地假服务端验证失败分类、输出校验、
 增量翻译的触发条件），但**还没接过真实模型**。v0.2 把它接到了真模型上：
@@ -220,7 +247,23 @@ v0.1 时这两个引擎的代码已写好并通过离线自测（用本地假服
 | 「帮我把这个 API 的 end point 改成那个 post 请求」 | →「帮我把这个 API 的 endpoint 改成 POST 请求。」 | 1.8 s |
 | 整段中译英 | → 通顺英文，要点齐全 | 1.1 s |
 
-### v0.3 —— 打包与易用性
+### v0.3 —— 修正模式 ✅ 已完成（当前版本）
+
+v0.2 把模型接上了，但「修正」只有一种力度：同一个 Prompt 既要照顾"别动我的字"，
+又要照顾"整理成能发出去的文字"，结果两边都不讨好。
+
+- ✅ **三种内置力度**：不整理（只修识别错误）/ 轻度整理（去口水词、补标点、保留措辞）/
+  深度整理（整理成书面表达）
+- ✅ **卡片式选择**：沿用参考图的做法 —— 名称 + 一句话说明 + 效果示例，
+  三种力度并排对比，选中的那张高亮
+- ✅ **自定义模式**：自己起名、写说明与 Prompt，与内置模式同等对待；
+  内置的删不掉（它们是产品默认行为）
+- ✅ **去除结尾句号**开关
+- ✅ 配套修掉一个真问题：**推理模型会先把 `max_tokens` 花在思考上**，预算不够时
+  `content` 为空，用户看到的是"修正在报输出长度失控"——现在单独分类并说明
+  「调大 max_tokens 或换非推理模型」
+
+### v0.4 —— 打包与易用性
 
 - 一键安装包（不再需要用户自己建 venv）
 - 开机自启 + 托盘图标
@@ -302,6 +345,9 @@ both meanings — **flow** (the psychology concept, 心流) and **streaming** (�
 | Auto reconnect / auto recovery after the service crashes | ✅ |
 | Settings UI | ✅ |
 | **LLM text correction** (de-filler, punctuation, homophones, number normalisation) | ✅ tested against a real model |
+| **Three correction strengths** (none / light / deep, card picker) | ✅ |
+| **Custom correction modes** (your own name, description and prompt) | ✅ |
+| Strip the trailing full stop | ✅ |
 | **Streaming bilingual translation** (finalised segments are never re-translated) | ✅ tested against a real model |
 | Any OpenAI-compatible endpoint (local Ollama / LM Studio / llama.cpp / vLLM / cloud) | ✅ presets, model list, connection check |
 
@@ -336,7 +382,20 @@ Self-tests (no keypress, no speech, no API key needed): `python tools\run_all_te
 
 ### Optional: connect an LLM for correction / translation
 
-Off by default. Open **Settings → 修正 (Correction)**, pick a preset, hit **测试连接 (Test connection)**:
+Off by default. Open **Settings → 修正 (Correction)**, pick a preset under 模型接入, hit
+**测试连接 (Test connection)**. Then choose a correction strength by clicking a card:
+
+| Mode | What it does | Same sentence, three ways |
+|---|---|---|
+| **不整理 (none)** | fixes only clear recognition errors, changes nothing else | 嗯我跟你说明天**会议**吧不对不对先讨论排期再聊产品方案 |
+| **轻度整理 (light)** | drops fillers and self-corrections, adds punctuation, keeps your wording | 我跟你说，先讨论排期，再聊产品方案。 |
+| **深度整理 (deep)** | keeps the meaning, rewrites into written prose | 我跟你说，先讨论排期，再聊产品方案。 |
+
+(source: `嗯我跟你说明天回议吧不对不对先讨论排期再聊产品方案`)
+
+You can also **add your own modes** — name, one-line description, example and prompt
+(`{text}` is the transcript). Custom modes are treated exactly like the built-in ones.
+A separate toggle removes a trailing full stop, for when you are dictating mid-thought.
 
 | Scenario | Preset | Note |
 |---|---|---|
@@ -353,8 +412,12 @@ Things we learned the hard way:
   pasted `http://localhost:8080/v1/chat/completions` — all normalised automatically.
 - **Test connection** pulls the server's model list into the dropdown, so you never have to
   remember names like `qwen2.5:7b`.
+- **Prefer a non-reasoning instruct model.** Reasoning models "think" first: measured 6–18 s to
+  correct one sentence, versus well under a second for a local 7B instruct model.
 - **A broken LLM never costs you a sentence**: auth/connection problems tell you to fix the config;
-  timeouts / rate limits / 5xx silently fall back to injecting the raw transcript.
+  a reasoning model that burns its whole `max_tokens` budget on thinking is reported as such
+  (raise `max_tokens` or switch model); timeouts, rate limits and 5xx silently fall back to the
+  raw transcript.
 
 ```bash
 python tools\test_llm_live.py --list-models     # what models does the endpoint offer?
@@ -374,7 +437,16 @@ side by side and never re-translates an already-finalised segment. A broken LLM 
 sentence: auth/connection errors tell you to fix the config, while timeouts, rate limits and 5xx
 silently fall back to the raw transcript.
 
-**v0.3 — packaging and ergonomics.** One-click installer, autostart + tray icon, richer overlay.
+**v0.3 — correction strengths. ✅ Done (current release).** v0.2 connected the model, but correction
+had a single strength: one prompt had to serve both "don't touch my words" and "make this sendable",
+and did neither well. v0.3 adds three built-in strengths (none / light / deep) presented as
+side-by-side cards with a name, a one-line description and a worked example, plus user-defined modes
+with their own name and prompt, and an option to drop the trailing full stop. It also fixes a real
+issue found while testing: reasoning models spend their `max_tokens` budget on thinking first, so the
+answer never arrives — that failure mode is now classified and explained instead of surfacing as a
+baffling "output too long".
+
+**v0.4 — packaging and ergonomics.** One-click installer, autostart + tray icon, richer overlay.
 **Longer term.** More recognition languages (the model already supports several), and
 macOS/Linux clients (the service protocol is already cross-platform).
 

@@ -169,6 +169,51 @@ def case_incremental(client: LlmClient) -> tuple[str, str, list]:
     return "、".join(partials), text, checks
 
 
+def case_modes(cfg: dict) -> tuple[str, str, list]:
+    """同一句话跑三种修正模式，确认它们**真的**产生了不同结果。
+
+    只断言"Prompt 文本不一样"是不够的 —— 那只是配置层的差异。真正要证明的是
+    模型拿到不同模式的 Prompt 后行为确实不同：该保留口水词的要保留，
+    该去掉的要去掉，该更短的更短。
+    """
+    from client.correction_modes import EXAMPLE_INPUT
+    from client.llm import default_client
+
+    src = EXAMPLE_INPUT
+    results: dict[str, str] = {}
+    ms: dict[str, float] = {}
+    for mid in ("none", "light", "deep"):
+        t0 = time.monotonic()
+        out = default_client(dict(cfg, mode=mid)).correct(src)
+        results[mid] = out.text
+        ms[mid] = (time.monotonic() - t0) * 1000
+        print("    [%s] → %s  (%.0f ms)" % (mid, results[mid], ms[mid]))
+
+    def has_filler(t: str) -> bool:
+        return any(f in t for f in ("嗯", "那个", "不对不对"))
+
+    checks = [
+        ("三个模式都拿到了结果",
+         all(results[m].strip() for m in results),
+         "%s" % {k: v[:20] for k, v in results.items()}),
+        ("不整理：**保留**口水词（没有被过度改写）",
+         has_filler(results["none"]), repr(results["none"])),
+        ("不整理：仍然修掉了错别字（回议→会议）",
+         "会议" in results["none"], repr(results["none"])),
+        ("轻度整理：去掉了口水词",
+         not has_filler(results["light"]), repr(results["light"])),
+        ("深度整理：去掉了口水词",
+         not has_filler(results["deep"]), repr(results["deep"])),
+        ("深度整理：不比不整理长（整理成书面表达应当更精炼）",
+         len(results["deep"]) <= len(results["none"]),
+         "%d vs %d" % (len(results["deep"]), len(results["none"]))),
+        ("三种模式的输出并不相同",
+         len(set(results.values())) >= 2,
+         "去重后 %d 种" % len(set(results.values()))),
+    ]
+    return src, " / ".join("%s=%s" % (k, results[k]) for k in ("none", "light", "deep")), checks
+
+
 def cmd_list_models(client: LlmClient) -> int:
     """列出服务端可用模型 —— 本地模型的名字用户不可能记得住。"""
     try:
@@ -282,7 +327,9 @@ def main() -> int:
 
     cases = [("口水词", case_fillers), ("同音纠错", case_homophone),
              ("数字", case_numbers), ("中英混说", case_mixed),
-             ("整段翻译", case_translate), ("增量翻译", case_incremental)]
+             ("整段翻译", case_translate), ("增量翻译", case_incremental),
+             # 修正模式要拿到完整 cfg 才能各建一个 client，所以用闭包兜一下
+             ("修正模式", lambda _client: case_modes(cfg))]
     if args.only:
         want = {s.strip() for s in args.only.split(",")}
         cases = [c for c in cases if c[0] in want]

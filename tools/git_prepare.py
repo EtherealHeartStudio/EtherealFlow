@@ -13,8 +13,8 @@
 用法::
 
     python tools/git_prepare.py                 # 准备 + 打印将要提交的内容
-    python tools/git_prepare.py --commit        # 有身份时提交并打 v0.2.0 tag
-    python tools/git_prepare.py --tag v0.2.0
+    python tools/git_prepare.py --commit        # 有身份时提交并打 v0.3.0 tag
+    python tools/git_prepare.py --tag v0.3.0
 """
 
 from __future__ import annotations
@@ -66,7 +66,7 @@ def staged_files(git: str) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--commit", action="store_true", help="有身份时提交并打 tag")
-    parser.add_argument("--tag", default="v0.2.0")
+    parser.add_argument("--tag", default="v0.3.0")
     parser.add_argument("--message", default="", help="提交信息（默认自动生成）")
     args = parser.parse_args()
 
@@ -137,7 +137,7 @@ def main() -> int:
         print('  git config --global user.email "you@example.com"')
         print("然后重新运行：python tools/git_prepare.py --commit")
         print("\n文件已经 staged，你也可以直接自己提交：")
-        print('  git commit -m "EtherealFlow v0.2.0: 接入真实大模型做修正与翻译"')
+        print('  git commit -m "EtherealFlow v0.3.0: 修正模式（不整理/轻度/深度）+ 自定义模式"')
         return 0
 
     has_staged = bool(staged_files(git))
@@ -147,7 +147,7 @@ def main() -> int:
         message = args.message
         if not message:
             subject = run(git, "log", "--oneline", "-1", check=False).stdout.strip()
-            message = ("EtherealFlow v0.2.0: Windows 流式语音输入法\n\n"
+            message = ("EtherealFlow v0.3.0: Windows 流式语音输入法\n\n"
                        "- WSL 流式识别服务（WebSocket，包装 Confucius4-R2T2 llama.cpp 后端）\n"
                        "- Windows 客户端：全局热键 / 16k 采集 / 不抢焦点悬浮窗\n"
                        "- LLM 整段修正（失败分类 + 输出校验）\n"
