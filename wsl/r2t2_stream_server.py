@@ -5,11 +5,12 @@
 把官方 Confucius4-R2T2 的 llama.cpp 流式后端（``R2T2LlamaASRModel.LlamaNative``）
 包装成一个常驻 WebSocket 服务，为 Windows 端语音输入法客户端提供**累积**识别文本。
 
-运行环境（见 需求文档 §6）::
+运行环境（见 需求文档 §6；`WS` 是本工作区在 WSL 里的挂载路径)::
 
-    export LD_LIBRARY_PATH=/home/r2t2/Confucius4-R2T2/.venv/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:/home/r2t2/Confucius4-R2T2/.venv/lib/python3.12/site-packages/nvidia/cublas/lib
-    export GGUF_DIR=/home/r2t2/models
-    /home/r2t2/Confucius4-R2T2/.venv/bin/python r2t2_stream_server.py
+    WS=<工作区在 WSL 下的路径>
+    export LD_LIBRARY_PATH=$WS/runtime/r2t2/Confucius4-R2T2/.venv/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:$WS/runtime/r2t2/Confucius4-R2T2/.venv/lib/python3.12/site-packages/nvidia/cublas/lib
+    export GGUF_DIR=$WS/models/r2t2
+    $WS/runtime/r2t2/Confucius4-R2T2/.venv/bin/python r2t2_stream_server.py
 
 协议（需求文档 §7.1）
 
@@ -63,9 +64,13 @@ except ImportError:  # pragma: no cover - websockets < 14
 SAMPLE_RATE = 16000
 MODEL_ID = "confucius4-r2t2"
 
-REPO_DIR = os.environ.get("R2T2_REPO", "/home/r2t2/Confucius4-R2T2")
-HF_DIR = os.environ.get("R2T2_HF_DIR", "/home/r2t2/Confucius4-R2T2-hf")
-GGUF_DIR = os.environ.get("GGUF_DIR", "/home/r2t2/models")
+# 工作区根目录：本文件位于 <工作区>/EtherealFlow/wsl/，向上两级就是工作区。
+# 用相对推导而不是硬编码绝对路径，换机器/换目录都不用改。
+_WS = os.environ.get("EF_WS") or str(Path(__file__).resolve().parents[2])
+
+REPO_DIR = os.environ.get("R2T2_REPO", f"{_WS}/runtime/r2t2/Confucius4-R2T2")
+HF_DIR = os.environ.get("R2T2_HF_DIR", f"{_WS}/runtime/r2t2-hf")
+GGUF_DIR = os.environ.get("GGUF_DIR", f"{_WS}/models/r2t2")
 
 HOST = os.environ.get("R2T2_STREAM_HOST", "0.0.0.0")
 PORT = int(os.environ.get("R2T2_STREAM_PORT", "18300"))
@@ -86,7 +91,8 @@ MAX_MESSAGE_BYTES = int(os.environ.get("R2T2_MAX_MESSAGE_BYTES",
 DEFAULT_LANGUAGE = os.environ.get("R2T2_LANGUAGE") or None
 DEFAULT_CONTEXT = os.environ.get("R2T2_CONTEXT", "")
 
-LOG_DIR = Path(os.environ.get("R2T2_LOG_DIR", "/home/r2t2/etherealflow/logs"))
+LOG_DIR = Path(os.environ.get("R2T2_LOG_DIR",
+                              f"{_WS}/runtime/logs"))
 NATIVE_LOG_MAX_BYTES = 8 * 1024 * 1024
 
 log = logging.getLogger("etherealflow.stream")

@@ -46,6 +46,9 @@ from client.translator import IncrementalTranslator         # noqa: E402
 # --------------------------------------------------------------------------- #
 
 FILLERS = ("嗯", "啊", "呃", "那个", "就是", "这个这个")
+#: 断言用的「纯口水词」。「就是」不算：在「今天**就是**测试一下」里它是副词
+#: （= 只是），删掉会改变原意，模型保留它是正确行为。
+PURE_FILLERS = ("嗯", "啊", "呃", "那个", "这个这个")
 
 
 def case_fillers(client: LlmClient) -> tuple[str, str, list]:
@@ -56,8 +59,8 @@ def case_fillers(client: LlmClient) -> tuple[str, str, list]:
     keep = ["今天", "测试", "语音输入法", "口水词"]
     checks = [
         ("拿到了结果", not out.degraded or out.changed, out.describe()),
-        ("去掉了口水词", not any(f in text for f in FILLERS if f != "这个这个"),
-         "残留：%s" % [f for f in FILLERS if f in text]),
+        ("去掉了口水词", not any(f in text for f in PURE_FILLERS),
+         "残留：%s" % [f for f in PURE_FILLERS if f in text]),
         ("补了标点", any(p in text for p in "，。！？"), repr(text)),
         ("保住了原意", all(k in text for k in keep),
          "缺：%s" % [k for k in keep if k not in text]),
@@ -97,13 +100,16 @@ def case_numbers(client: LlmClient) -> tuple[str, str, list]:
 
 def case_mixed(client: LlmClient) -> tuple[str, str, list]:
     """中英混说：不能把英文吃掉。"""
-    src = "帮我把这个 API 的 end point 改成那个 post 请求"
+    src = "嗯帮我把这个 API 的 end point 改成那个 post 请求"
     out = client.correct(src)
     text = out.text
     checks = [
         ("拿到了结果", bool(text.strip()), out.describe()),
         ("英文保留", "API" in text.upper() and "POST" in text.upper(), repr(text)),
-        ("去掉了那个", "那个" not in text, repr(text)),
+        # 「那个」在这里是指示代词（改成**那个** post 请求），不是口水词，
+        # 删掉会改变原意，所以只断言真正的口水词「嗯」被去掉。
+        ("去掉了口水词嗯", "嗯" not in text, repr(text)),
+        ("没有把英文译成中文", "请求" in text or "request" in text.lower(), repr(text)),
     ]
     return src, text, checks
 
@@ -150,8 +156,9 @@ def case_incremental(client: LlmClient) -> tuple[str, str, list]:
     res = tr.finish(partials[-1])
     text = res.text
     # 英文句子之间必须有空格。硬拼会产生 "afternoon.Discuss" 这种（实测踩到过），
-    # 而纯中文用例永远暴露不出这个问题。
-    missing_space = re.search(r"[a-z][.,!?][A-Za-z]", text)
+    # 而纯中文用例永远暴露不出这个问题。只看「小写字母 + 标点 + 大写字母」，
+    # 否则 "p.m." 这类缩写会被误判成缺空格。
+    missing_space = re.search(r"[a-z][.,!?][A-Z]", text)
     checks = [
         ("拿到了译文", bool(text.strip()), res.describe()),
         ("分了段", len(res.segments) >= 2, "段数=%d" % len(res.segments)),

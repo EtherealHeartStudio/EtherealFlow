@@ -10,6 +10,20 @@
 #   --restart           部署后重启服务
 set -euo pipefail
 
+# --------------------------------------------------------------------------- #
+# 本机护栏：这个脚本是给「新机器」用的（把服务复制到 $HOME 下再注册 systemd 单元）。
+# 本工作区已经自带完整运行时（workspace/runtime/），服务也是直接从工作区启动的，
+# 再跑这个脚本会造出第二份副本 —— 直接拦掉。
+# --------------------------------------------------------------------------- #
+WORKSPACE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+if [ -f "$WORKSPACE_DIR/runtime/scripts/runtime.sh" ]; then
+  echo "检测到工作区自带运行时：$WORKSPACE_DIR/runtime" >&2
+  echo "本机请改用：bash $WORKSPACE_DIR/runtime/scripts/install_units.sh" >&2
+  echo "（只注册 systemd 单元，不复制文件）" >&2
+  echo "本脚本仅用于在全新机器上从零部署。" >&2
+  exit 3
+fi
+
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="${R2T2_APP_DIR:-/home/r2t2/etherealflow}"
 UNIT_DIR="$HOME/.config/systemd/user"

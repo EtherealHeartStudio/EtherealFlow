@@ -6,17 +6,20 @@
 # 所以运行前必须把这两个目录塞进 LD_LIBRARY_PATH（见 需求文档 §6.2①）。
 set -euo pipefail
 
-VENV="${R2T2_VENV:-/home/r2t2/Confucius4-R2T2/.venv}"
-APP_DIR="${R2T2_APP_DIR:-/home/r2t2/etherealflow}"
+# 工作区根目录：本脚本位于 <工作区>/EtherealFlow/scripts/，向上两级就是工作区。
+WS="${EF_WS:-$(dirname "$(dirname "$(dirname "$0")")")}"
+
+VENV="${R2T2_VENV:-$WS/runtime/r2t2/Confucius4-R2T2/.venv}"
+APP_DIR="${R2T2_APP_DIR:-$WS/EtherealFlow/wsl}"
 
 export LD_LIBRARY_PATH="$VENV/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:$VENV/lib/python3.12/site-packages/nvidia/cublas/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-export GGUF_DIR="${GGUF_DIR:-/home/r2t2/models}"
-export R2T2_REPO="${R2T2_REPO:-/home/r2t2/Confucius4-R2T2}"
-export R2T2_HF_DIR="${R2T2_HF_DIR:-/home/r2t2/Confucius4-R2T2-hf}"
+export GGUF_DIR="${GGUF_DIR:-$WS/models/r2t2}"
+export R2T2_REPO="${R2T2_REPO:-$WS/runtime/r2t2/Confucius4-R2T2}"
+export R2T2_HF_DIR="${R2T2_HF_DIR:-$WS/runtime/r2t2-hf}"
 export R2T2_STREAM_HOST="${R2T2_STREAM_HOST:-0.0.0.0}"
 export R2T2_STREAM_PORT="${R2T2_STREAM_PORT:-18300}"
 export R2T2_CHUNK_MS="${R2T2_CHUNK_MS:-160}"
-export R2T2_LOG_DIR="${R2T2_LOG_DIR:-$APP_DIR/logs}"
+export R2T2_LOG_DIR="${R2T2_LOG_DIR:-$WS/runtime/logs}"
 export PYTHONUNBUFFERED=1
 
 mkdir -p "$R2T2_LOG_DIR"
