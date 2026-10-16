@@ -115,6 +115,18 @@ EtherealFlow 是**边说边出**：
 wsl.exe -d Ubuntu -u <用户> -- bash -l "/mnt/d/<仓库路径>/scripts/deploy_wsl.sh" --install-service --restart
 ```
 
+> ⚠️ **上面这条是给「新机器」用的。** 如果仓库所在的工作区里已经有 `runtime/` 目录
+> （即本项目自带的完整运行时：框架 + venv + 模型），`deploy_wsl.sh` 会**主动拒绝执行** ——
+> 那种情况下服务本来就从工作区启动，再部署一次只会在 `$HOME` 下造出第二份 10 GB 级副本。
+> 工作区模式请改用：
+>
+> ```bash
+> bash <工作区>/runtime/scripts/runtime.sh start all   # 启停
+> bash <工作区>/runtime/scripts/runtime.sh status      # 看状态
+> ```
+>
+> 详见 `<工作区>/runtime/README.md`。
+
 ### 2. 运行客户端
 
 ```bash
