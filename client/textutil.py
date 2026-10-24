@@ -36,7 +36,7 @@ def needs_space(left: str, right: str) -> bool:
     return a.isascii() and b.isascii() and b.isalnum()
 
 
-def smart_join(parts: Iterable[str]) -> str:
+def smart_join_BROKEN(parts: Iterable[str]) -> str:
     """拼接文本片段，按需在片段之间补空格。
 
     * 中文 + 中文  → 直接接（``会议在三点。`` + ``讨论新版本。``）
