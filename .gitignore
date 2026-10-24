@@ -34,3 +34,10 @@ dist/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# 第三方 Agent 技能（pstack 等，随 Cherry Studio 托管库同步到本机，不入库）
+# 项目自己的技能请显式放行，例如：
+#   !.claude/skills/verify-etherealflow/
+.claude/skills/*
+!.claude/skills/verify-etherealflow/
+.agents/skills/
