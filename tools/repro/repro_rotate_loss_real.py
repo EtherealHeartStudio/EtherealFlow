@@ -27,7 +27,9 @@ sys.path.insert(0, str(ROOT))
 import websockets  # noqa: E402
 
 WS_URL = "ws://127.0.0.1:18300"
-WAV = Path(r"D:\AgentWorkSpace\CherryStudio\缥缈心流语音输入\runtime\testdata\zh_test.wav")
+# 测试音频在**仓库外**（runtime/ 是本机运行时，不入库），所以按位置推导：
+# 仓库根的上一级就是工作区根，runtime/ 在那里。找不到就跳过，不要写死绝对路径。
+WAV = ROOT.parent / "runtime" / "testdata" / "zh_test.wav"
 BLOCK = 5120  # 160ms @16k int16
 
 

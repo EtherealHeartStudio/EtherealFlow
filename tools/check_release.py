@@ -19,6 +19,10 @@ WARN 只是提醒，不阻断发布，但应当逐条确认。
 
 from __future__ import annotations
 
+# 强制 stdout 用 UTF-8：Windows 控制台/管道默认 cp1252，
+# 打印中文会 UnicodeEncodeError（曾导致 CI 全部失败，见 tools/_utf8.py）。
+import _utf8  # noqa: F401
+
 import argparse
 import os
 import re

@@ -37,6 +37,7 @@ HWND_TOPMOST = -1
 SWP_NOSIZE = 0x0001
 SWP_NOMOVE = 0x0002
 SWP_NOACTIVATE = 0x0010
+SWP_SHOWWINDOW = 0x0040
 
 VK_SHIFT, VK_CONTROL, VK_MENU = 0x10, 0x11, 0x12
 VK_LWIN, VK_RWIN = 0x5B, 0x5C
@@ -178,16 +179,53 @@ GA_ROOT = 2
 user32.GetAncestor.restype = wt.HWND
 user32.GetAncestor.argtypes = [wt.HWND, ctypes.c_uint]
 
+# GetParent 同样必须显式声明：64 位下返回的句柄会被默认的 c_int 截断，
+# 截断后的句柄仍然「看起来是个数」，但 GetWindowLongW 会作用到错误的窗口上
+# （症状是「样式加了但没生效」，不报错）。见 docs/development.md §7。
+user32.GetParent.restype = wt.HWND
+user32.GetParent.argtypes = [wt.HWND]
+
+# SetFocus / IsWindow 同样要声明：SetFocus 返回 HWND，不声明会被截成 32 位。
+user32.SetFocus.restype = wt.HWND
+user32.SetFocus.argtypes = [wt.HWND]
+user32.IsWindow.restype = wt.BOOL
+user32.IsWindow.argtypes = [wt.HWND]
+
 
 def top_level_window(hwnd: int) -> int:
     """返回真正的顶层窗口。
 
-    **踩过的坑**：tkinter 的 ``winfo_id()`` 返回的是 ``TkChild`` 子窗口，
-    真正会被激活、会抢焦点的是它父级的 ``TkTopLevel``。
-    把 ``WS_EX_NOACTIVATE`` 加在子窗口上**完全无效** —— 悬浮窗照样抢焦点。
+    **踩过的坑（两个，第二个更隐蔽）**：
+
+    1. tkinter 的 ``winfo_id()`` 返回的是 ``TkChild`` 子窗口，
+       真正会被激活、会抢焦点的是它父级的 ``TkTopLevel``。
+       把 ``WS_EX_NOACTIVATE`` 加在子窗口上**完全无效** —— 悬浮窗照样抢焦点。
+
+    2. **``overrideredirect(True) 之后，``GetAncestor(GA_ROOT)`` 也失效了**：
+       Tk 会重建 wrapper 层级，这时 ``GA_ROOT`` 返回的就是那个 ``TkChild`` 自己，
+       而真正的 ``TkTopLevel``（title='tk'）成了它的**兄弟**而不是父级。
+       于是「加在顶层上」实际又加回了子窗口 —— 表面看 ``has_noactivate()`` 返回
+       True（自欺欺人），可真正会激活的窗口根本没有这个样式。
+
+       实测症状：客户端跑起来后，前台窗口变成悬浮窗自己的 ``TkTopLevel``，
+       文本注入被「前台是悬浮窗自己」的保护逻辑跳过 —— 表现为
+       **「说了话，但什么都没进去」**。
+
+    所以这里**改用 ``GetParent`` 链**往上找：``TkChild`` 的父级就是真正的
+    ``TkTopLevel``。``GA_ROOT`` 只作为最后的兜底。
     """
     if not hwnd:
         return 0
+    # 1) GetParent 链：TkChild → TkTopLevel
+    cur = hwnd
+    for _ in range(8):
+        parent = int(user32.GetParent(wt.HWND(cur)) or 0)
+        if not parent or parent == cur:
+            break
+        cur = parent
+        if class_name(cur) == "TkTopLevel":
+            return cur
+    # 2) 兜底：GA_ROOT
     root = int(user32.GetAncestor(wt.HWND(hwnd), GA_ROOT) or 0)
     return root or hwnd
 
@@ -196,30 +234,72 @@ def window_exstyle(hwnd: int) -> int:
     return int(user32.GetWindowLongW(wt.HWND(hwnd), GWL_EXSTYLE))
 
 
+def set_noactivate_style(hwnd: int) -> int:
+    """给**指定句柄**加 WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW。
+
+    与 ``apply_noactivate`` 的区别：**不解析顶层，就加在给定的句柄上**。
+    建 Tk 窗口时需要分两步走（见 ``client/overlay.py`` 的注释）：
+    先给 child 打标记（那时顶层还不存在），层级建好后再给顶层补加。
+
+    ⚠️ 对同一个 child **重复调用会触发抢占**（实测：第二次 SetWindowLongW
+    会让窗口重新激活）。所以每个句柄只加一次。
+    """
+    if not hwnd:
+        return 0
+    ex = window_exstyle(hwnd)
+    new = ex | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW
+    if new != ex:
+        user32.SetWindowLongW(wt.HWND(hwnd), GWL_EXSTYLE, ctypes.c_long(new))
+    return window_exstyle(hwnd)
+
+
 def apply_noactivate(hwnd: int) -> int:
     """给**顶层窗口**加上 WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW。
 
     返回顶层窗口最终的扩展样式。
     """
     top = top_level_window(hwnd)
-    ex = window_exstyle(top)
-    new = ex | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW
-    if new != ex:
-        user32.SetWindowLongW(wt.HWND(top), GWL_EXSTYLE, ctypes.c_long(new))
-    return window_exstyle(top)
+    return set_noactivate_style(top)
 
 
 def has_noactivate(hwnd: int) -> bool:
-    ex = window_exstyle(top_level_window(hwnd))
+    """真正的顶层窗口是否带 NOACTIVATE + TOOLWINDOW。
+
+    注意：验的是**顶层**，不是传入的句柄 —— 早先的版本验的是解析出来的
+    顶层，而当时 ``top_level_window`` 因 GA_ROOT 失效而返回了 child 自己，
+    于是永远「通过」（自欺欺人），实际真正会激活的窗口根本没有样式。
+    """
+    top = top_level_window(hwnd)
+    if not top or top == hwnd:
+        # 还没解析出不同的顶层：直接查传入句柄
+        ex = window_exstyle(hwnd)
+    else:
+        ex = window_exstyle(top)
     return bool(ex & WS_EX_NOACTIVATE) and bool(ex & WS_EX_TOOLWINDOW)
 
 
 def show_without_activating(hwnd: int) -> None:
-    """显示窗口但不激活它（作用于顶层窗口）。"""
+    """显示窗口但不激活它（作用于顶层窗口）。
+
+    ⚠️ **顺序很重要：必须先 SetWindowPos(SWP_NOACTIVATE)，再 ShowWindow。**
+
+    反过来（先 ShowWindow 后 SetWindowPos）会**真的抢走焦点** —— 实测：
+    被测窗口的前台身份从原窗口变成了悬浮窗自己，导致文本注入被跳过
+    （「前台是悬浮窗自己」），表现为「说了话但什么都没进去」。
+
+    原因：``ShowWindow(SW_SHOWNOACTIVATE)`` 对**处于隐藏状态**的窗口，
+    Windows 会先激活它再显示；事后再用 ``SetWindowPos(SWP_NOACTIVATE)``
+    也追不回来。而 ``SetWindowPos`` 带着 ``SWP_NOACTIVATE`` 打在隐藏窗口上
+    是**不生效**的 —— 所以得先把「不要激活」的标记打上，再显示。
+
+    对照实验见 ``tools/repro/overlay_focus_timing.py``。
+    """
     top = top_level_window(hwnd)
-    user32.ShowWindow(wt.HWND(top), SW_SHOWNOACTIVATE)
+    # 先打标记（此时窗口还隐藏着，SWP_NOACTIVATE 会生效）
     user32.SetWindowPos(wt.HWND(top), wt.HWND(HWND_TOPMOST), 0, 0, 0, 0,
                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+    # 再显示 —— 这一次不会激活
+    user32.ShowWindow(wt.HWND(top), SW_SHOWNOACTIVATE)
 
 
 # --------------------------------------------------------------------------- #
@@ -251,31 +331,38 @@ def class_name(hwnd: int) -> str:
     return buf.value
 
 
-def force_foreground(hwnd: int) -> bool:
+def force_foreground(hwnd: int, alt_tap: bool = True) -> bool:
     """把窗口弄到前台；返回是否成功（**兜底手段**，正常路径不该需要）。
 
     顺序很重要：Windows 有"前台锁"——不是前台的进程直接调
     ``SetForegroundWindow`` 会被静默忽略。所以**先敲一下 Alt** 解开锁，
     再逐级降级（push-2-talk 记录过的三级方案 + SwitchToThisWindow）。
+
+    ``alt_tap=False``：跳过敲 Alt 那一下。
+    ⚠️ 敲 Alt 会**改变用户的键盘焦点**（实测会让「键盘焦点始终未被抢走」
+    这条断言失败）。所以「把焦点还给用户」这种场景要用 ``alt_tap=False`` ——
+    靠第 2 级的 AttachThreadInput 绕过前台锁就够了。
     """
     if not hwnd:
         return False
     if foreground_window() == hwnd:
         return True
 
-    def _alt_tap() -> None:
+    def _tap() -> None:
+        if not alt_tap:
+            return
         user32.keybd_event(VK_MENU, 0, 0, 0)
         user32.keybd_event(VK_MENU, 0, 2, 0)
 
     user32.ShowWindow(wt.HWND(hwnd), SW_RESTORE)
 
     # 1) 先解开前台锁再设前台
-    _alt_tap()
+    _tap()
     user32.SetForegroundWindow(wt.HWND(hwnd))
     if foreground_window() == hwnd:
         return True
 
-    # 2) AttachThreadInput 绕过前台锁
+    # 2) AttachThreadInput 绕过前台锁（**不需要**敲 Alt，也不会动键盘焦点）
     fg = foreground_window()
     target_thread = user32.GetWindowThreadProcessId(wt.HWND(hwnd), None)
     cur_thread = kernel32.GetCurrentThreadId()
@@ -305,7 +392,7 @@ def force_foreground(hwnd: int) -> bool:
     # 4) 最后再试一次 SetForegroundWindow + 置顶
     user32.SetWindowPos(wt.HWND(hwnd), wt.HWND(HWND_TOPMOST), 0, 0, 0, 0,
                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
-    _alt_tap()
+    _tap()
     user32.SetForegroundWindow(wt.HWND(hwnd))
     return foreground_window() == hwnd
 
@@ -418,3 +505,31 @@ def foreground_focus_state() -> tuple[int, int, int]:
     info = gui_thread_info(tid)
     focus = int(info.hwndFocus or 0) if info else 0
     return (fg, tid, focus)
+
+
+def set_focus_across_threads(hwnd: int) -> bool:
+    """把键盘焦点设到**别的线程**拥有的窗口上。
+
+    为什么需要：``SetFocus`` 只能设置**调用线程**的焦点。要改别的线程
+    （比如用户的 Chrome / 编辑器窗口）的焦点，必须先用 ``AttachThreadInput``
+    把两个线程的输入队列临时关联起来。
+
+    不这么做的话，Tk 首次映射悬浮窗时夺走的键盘焦点**还不回来** ——
+    实测焦点会停在 0（等于用户所有键盘输入都落空），症状是
+    「悬浮窗一出现，用户的窗口就收不到按键」。
+
+    关联失败（权限不足等）不算致命：返回 False，调用方自行决定要不要兜底。
+    """
+    if not hwnd:
+        return False
+    cur = int(kernel32.GetCurrentThreadId())
+    tid = int(user32.GetWindowThreadProcessId(wt.HWND(hwnd), None) or 0)
+    attached = False
+    if tid and tid != cur:
+        attached = bool(user32.AttachThreadInput(cur, tid, True))
+    try:
+        user32.SetFocus(wt.HWND(hwnd))
+    finally:
+        if attached:
+            user32.AttachThreadInput(cur, tid, False)
+    return True

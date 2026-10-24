@@ -16,6 +16,10 @@
 
 from __future__ import annotations
 
+# 强制 stdout 用 UTF-8：Windows 控制台/管道默认 cp1252，
+# 打印中文会 UnicodeEncodeError（曾导致 CI 全部失败，见 tools/_utf8.py）。
+import _utf8  # noqa: F401
+
 import argparse
 import subprocess
 import sys
@@ -53,6 +57,12 @@ TESTS: list[tuple[str, str, bool]] = [
     # 需要一个**真实存在**的模型。没有可用的模型时它自报 [SKIP] 并退出 0，
     # 所以默认跑套件不会因为"用户还没配 LLM"而变红；想强制要求时加 --require。
     ("LLM 真机（修正/翻译）", "tools/test_llm_live.py", True),
+    # ↓ 这两个以前**不在套件里**，所以 v0.1.0–v0.3.0 的 CI 从来没跑过它们。
+    # 2026-10-24 把它们加进来，立刻暴露出「悬浮窗在创建/显示时抢焦点」
+    # 这个会让产品「说了话但什么都没进去」的严重缺陷。
+    # 缺识别服务时它们会明确 SKIP 并退出 0（见 tools/_deps.py）。
+    ("完整闭环（识别→修正→注入）", "tools/test_closed_loop.py", True),
+    ("翻译接入主流程", "tools/test_translate_flow.py", True),
 ]
 
 
@@ -75,16 +85,29 @@ def run_one(name: str, script: str, root: Path) -> tuple[str, bool, int, str]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--fast", action="store_true", help="跳过较慢的测试")
-    parser.add_argument("--only", nargs="*", default=[], help="只跑名字里含这些关键词的")
+    parser.add_argument("--only", nargs="*", default=[],
+                        help="只跑名字里含这些关键词的（匹配中文显示名或脚本名）")
     args = parser.parse_args()
 
     selected = []
     for name, script, slow in TESTS:
         if args.fast and slow:
             continue
-        if args.only and not any(k.lower() in name.lower() for k in args.only):
-            continue
+        if args.only:
+            # 同时匹配**中文显示名**和**脚本名** —— 只匹配显示名的话，
+            # `--only translator` 一个都选不中（脚本叫 test_translator.py，
+            # 显示名是「增量翻译」），却会「成功」地跑 0 个测试并退出 0，
+            # 看起来像全绿，其实什么都没跑。静默跳过是这类工具最危险的坑。
+            hay = (name + " " + script).lower()
+            if not any(k.lower() in hay for k in args.only):
+                continue
         selected.append((name, script))
+
+    if args.only and not selected:
+        print("没有任何测试匹配 %s —— 可用关键词：" % " ".join(args.only))
+        for name, script, _s in TESTS:
+            print("  %-28s %s" % (name, script))
+        return 2
 
     try:
         PROGRESS.unlink()
