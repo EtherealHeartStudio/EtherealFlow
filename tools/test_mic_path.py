@@ -15,6 +15,10 @@
 
 from __future__ import annotations
 
+# 强制 stdout 用 UTF-8：Windows 控制台/管道默认 cp1252，
+# 打印中文会 UnicodeEncodeError（曾导致 CI 全部失败，见 tools/_utf8.py）。
+import _utf8  # noqa: F401
+
 import argparse
 import sys
 import threading
@@ -25,7 +29,9 @@ import numpy as np
 import sounddevice as sd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import _deps                                         # noqa: E402
 from client.asr import AsrClient                      # noqa: E402
 from client.audio import MicCapture, _resample, read_wav_pcm16k  # noqa: E402
 
@@ -59,11 +65,28 @@ def play_pcm(pcm: bytes, device: int, stop: threading.Event) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--wav", required=True)
+    parser.add_argument("--wav", default="")
     parser.add_argument("--url", default="ws://127.0.0.1:18300")
     parser.add_argument("--seconds", type=float, default=2.0,
                         help="管道模式下录多久")
     args = parser.parse_args()
+
+    # 依赖检查：缺识别服务时**明确 SKIP**，不算失败
+    # （CI runner 上没有 WSL 服务；「环境做不到」不等于「代码错了」）。
+    skip = _deps.require_asr(host="127.0.0.1", port=int(args.url.rsplit(":", 1)[-1]))
+    if skip:
+        print(skip)
+        return 0
+
+    wav_path = args.wav or ""
+    if not wav_path:
+        found = _deps.find_wav()
+        if found is None:
+            print("[SKIP] 找不到测试音频（需要 16k 单声道 WAV）—— 本项跳过，"
+                  "不代表代码有问题。")
+            return 0
+        wav_path = str(found)
+    args.wav = wav_path
 
     pcm = read_wav_pcm16k(args.wav)
     duration = len(pcm) / 2.0 / 16000.0

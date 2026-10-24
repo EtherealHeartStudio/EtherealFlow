@@ -2,20 +2,44 @@ name: build
 
 # 需求文档 §11.2：用 GitHub Actions 或本地构建 Windows 安装包/可执行文件。
 # 本地等价命令：python scripts/build_exe.py
+#
+# ⚠️ 这个 workflow 在 v0.1.0 – v0.3.0 期间**从未成功跑过一次**：
+# 4 个 run 全部死在「离线自测」这一步，原因是 Windows runner 的 stdout
+# 编码是 cp1252，打印中文抛 UnicodeEncodeError。
+# 现在有两层防护，缺一不可：
+#   1. 每个工具脚本顶部 `import _utf8`（进程级，把 stdout 换成 UTF-8）
+#   2. 本文件里的 `PYTHONUTF8: 1`（环境级，连子进程都覆盖）
+# 只装第 1 层时，直接跑单个脚本仍可能崩；只装第 2 层时，
+# 本地开发者不设环境变量就仍可能崩。
+# 详见 tools/_utf8.py 与 docs/analysis/2026-10-24-代码图谱分析报告.md。
 
 on:
   push:
+    branches: ["main"]
     tags: ["v*"]
   workflow_dispatch:
   pull_request:
     paths:
       - "client/**"
+      - "wsl/**"
+      - "tools/**"
+      - "scripts/**"
+      - "docs/**"
       - "run_client.py"
       - "scripts/build_exe.py"
       - ".github/workflows/build.yml"
 
+env:
+  # 环境级编码兜底。PYTHONUTF8 开启 Python UTF-8 模式（PEP 540），
+  # 覆盖本 workflow 启动的所有进程，包括 run_all_tests.py 拉起的子进程。
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+
 jobs:
-  windows-exe:
+  # 快速检查：每次 push 都跑，只做语法自检 + 快速离线用例。
+  # 目标是「一分钟内知道有没有坏」，完整检查留给 full job。
+  quick:
+    name: 快速检查
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,10 +54,46 @@ jobs:
           python -m pip install numpy sounddevice websockets pyinstaller
 
       - name: 语法自检
-        run: python -m compileall -q client run_client.py scripts
+        run: python -m compileall -q client wsl tools scripts run_client.py
 
-      - name: 离线自测（不需要识别服务 / 麦克风 / API Key）
+      - name: 离线自测（快速子集）
+        run: python tools/run_all_tests.py --fast
+
+  # 完整检查：PR 与 tag 触发，跑全套并打包。
+  full:
+    name: 完整检查与打包
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy sounddevice websockets pyinstaller
+
+      - name: 语法自检
+        run: python -m compileall -q client wsl tools scripts run_client.py
+
+      - name: 离线自测（全部）
+        # 套件里已经包含闭环回放与翻译主流程（它们需要识别服务，
+        # 缺服务时会明确 SKIP 并退出 0，见 tools/_deps.py），
+        # 所以这里**不再单独跑一遍**。
         run: python tools/run_all_tests.py
+
+      - name: 识别服务客户端验收（需要识别服务，缺服务时明确 SKIP）
+        run: python tools/test_stream_client.py
+
+      - name: 麦克风链路（需要麦克风与识别服务）
+        continue-on-error: true
+        run: python tools/test_mic_path.py
+
+      - name: 多应用注入兼容性（需要装好那些应用）
+        continue-on-error: true
+        run: python tools/test_inject_apps.py
 
       - name: 发布前安全检查
         run: python tools/check_release.py
@@ -42,10 +102,26 @@ jobs:
         run: python scripts/build_exe.py
 
       - name: 产物自检
-        run: dist\EtherealFlow\EtherealFlow.exe --list-devices
+        # 路径必须是 build\dist\...：scripts/build_exe.py 输出到 build/dist/，
+        # 不是 dist/。v0.3.0 的 workflow 这里写错了，产物自检从未真正跑过。
+        run: build\dist\EtherealFlow\EtherealFlow.exe --list-devices
 
       - uses: actions/upload-artifact@v4
         with:
           name: EtherealFlow-windows-x64
           path: build/dist/EtherealFlow/
           if-no-files-found: error
+
+      - name: 测试结果摘要
+        if: always()
+        run: |
+          {
+            echo "## EtherealFlow CI 结果"
+            echo ""
+            echo "- commit: ${{ github.sha }}"
+            echo "- 事件: ${{ github.event_name }}"
+            echo ""
+          } >> $env:GITHUB_STEP_SUMMARY
+          if (Test-Path build\test_progress.log) {
+            Get-Content build\test_progress.log | Out-String | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          }

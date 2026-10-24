@@ -20,6 +20,10 @@
 
 from __future__ import annotations
 
+# 强制 stdout 用 UTF-8：Windows 控制台/管道默认 cp1252，
+# 打印中文会 UnicodeEncodeError（曾导致 CI 全部失败，见 tools/_utf8.py）。
+import _utf8  # noqa: F401
+
 import argparse
 import base64
 import hashlib
@@ -30,6 +34,11 @@ import struct
 import sys
 import time
 import wave
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import _deps  # noqa: E402
 
 OP_CONT, OP_TEXT, OP_BIN, OP_CLOSE, OP_PING, OP_PONG = 0x0, 0x1, 0x2, 0x8, 0x9, 0xA
 
@@ -199,13 +208,26 @@ def load_wav_as_pcm16k(path: str) -> bytes:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="EtherealFlow 流式识别服务验收客户端")
-    parser.add_argument("--wav", required=True, help="输入 WAV（任意采样率/声道，会转成 16k 单声道）")
+    parser.add_argument("--wav", default="", help="输入 WAV（任意采样率/声道，会转成 16k 单声道）")
     parser.add_argument("--url", default="ws://127.0.0.1:18300")
     parser.add_argument("--language", default=None, help="自动/Chinese/English；留空=自动")
     parser.add_argument("--context", default="", help="热词，逗号分隔")
     parser.add_argument("--chunk-ms", type=int, default=160)
     parser.add_argument("--fast", action="store_true", help="全速推送，不按实时节奏")
     args = parser.parse_args()
+
+    # 依赖检查：缺识别服务或缺音频时**明确 SKIP**，不算失败。
+    port = int(args.url.rsplit(":", 1)[-1])
+    skip = _deps.require_asr(port=port)
+    if skip:
+        print(skip)
+        return 0
+    if not args.wav:
+        found = _deps.find_wav()
+        if found is None:
+            print("[SKIP] 找不到测试音频（需要 WAV）—— 本项跳过，不代表代码有问题。")
+            return 0
+        args.wav = str(found)
 
     pcm = load_wav_as_pcm16k(args.wav)
     duration = len(pcm) / 2.0 / 16000.0

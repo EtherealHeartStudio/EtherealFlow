@@ -20,6 +20,10 @@ C. **剪贴板保护**：注入后剪贴板被还原；且**用户在注入后�
 
 from __future__ import annotations
 
+# 强制 stdout 用 UTF-8：Windows 控制台/管道默认 cp1252，
+# 打印中文会 UnicodeEncodeError（曾导致 CI 全部失败，见 tools/_utf8.py）。
+import _utf8  # noqa: F401
+
 import sys
 import time
 import tkinter as tk

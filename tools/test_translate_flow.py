@@ -15,6 +15,10 @@
 
 from __future__ import annotations
 
+# 强制 stdout 用 UTF-8：Windows 控制台/管道默认 cp1252，
+# 打印中文会 UnicodeEncodeError（曾导致 CI 全部失败，见 tools/_utf8.py）。
+import _utf8  # noqa: F401
+
 import json
 import subprocess
 import sys
@@ -26,6 +30,9 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import _deps                                # noqa: E402
 
 MARK = "<EN>"
 
@@ -89,10 +96,20 @@ def run_app(wav: str, llm_url: str, translate: bool) -> str:
 
 
 def main() -> int:
+    # 依赖检查：缺识别服务或缺音频时**明确 SKIP**，不算失败。
+    skip = _deps.require_asr()
+    if skip:
+        print(skip)
+        return 0
     wav = sys.argv[1] if len(sys.argv) > 1 else str(Path(tempfile.gettempdir()) / "cv-test16k.wav")
     if not Path(wav).exists():
-        print("找不到测试音频：%s" % wav)
-        return 2
+        found = _deps.find_wav()
+        if found is None:
+            print("[SKIP] 找不到测试音频：%s —— 需要一份 16k 单声道 WAV。"
+                  "本项跳过，不代表代码有问题。" % wav)
+            return 0
+        wav = str(found)
+        print("用找到的测试音频：%s" % wav)
 
     srv = ThreadingHTTPServer(("127.0.0.1", 0), FakeLlm)
     srv.daemon_threads = True
