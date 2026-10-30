@@ -63,6 +63,25 @@ def _bar_width(overlay: Overlay) -> int:
         return 0
 
 
+def _run_on_tk(overlay: Overlay, fn) -> None:
+    """在悬浮窗的 **Tk 主线程** 上跑 ``fn``，并等它跑完。
+
+    ⚠️ tkinter 不是线程安全的 —— 从别的线程碰 Tk 控件会出问题。
+    悬浮窗自己有现成的机制：``post("call", fn)`` 会在主线程执行。
+    """
+    done = threading.Event()
+
+    def wrapped() -> None:
+        try:
+            fn()
+        finally:
+            done.set()
+
+    overlay.post("call", wrapped)
+    if not done.wait(timeout=5.0):
+        raise AssertionError("主线程没有在 5 秒内执行回调")
+
+
 def _wait_canvas_width(overlay: Overlay, timeout: float = 3.0) -> int:
     """等 Canvas 算出真实宽度。
 
@@ -112,13 +131,21 @@ def main() -> int:
 
 
 def _run(overlay: Overlay) -> None:
-    def pump(seconds: float = 0.35) -> None:
-        """等主线程把队列消费掉。
+    def wait_for(predicate, timeout: float = 5.0) -> bool:
+        """轮询直到 ``predicate()`` 为真（或超时）。
 
-        ``post()`` 是异步的 —— 投进去就返回，真正生效要等主线程跑到
-        ``_drain``。这里 sleep 一下再断言。
+        ⚠️ **不要用「sleep 固定时长然后断言」** ——
+        慢的机器（CI runner）上 sleep 会**超时**，快的机器上又**不够**，
+        两种情况都会变成随机失败（实测：CI 上「静音后是渐降」那条就是这么红的）。
+
+        「等某个条件成立」与机器快慢**无关** —— 这是唯一稳的写法。
         """
-        time.sleep(seconds)
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            if predicate():
+                return True
+            time.sleep(0.02)
+        return predicate()
 
     # ---------- FR-3.6：error 状态存在 ---------- #
     check("FR-3.6 状态表里有 error 这一项",
@@ -127,7 +154,6 @@ def _run(overlay: Overlay) -> None:
 
     # ---------- 电平条在录音态出现 ---------- #
     overlay.show_listening()
-    pump(0.5)
     # 判据用 ``winfo_manager()``（控件是否在布局管理器里），**不用**
     # ``winfo_ismapped()``。
     #
@@ -137,8 +163,9 @@ def _run(overlay: Overlay) -> None:
     # （连跑 15 次有 1 次）。
     # 而 ``winfo_manager()`` 反映的是「这个控件在不在布局里」——
     # 这正是电平条显示/隐藏这件事本身，**确定**、不依赖窗口何时被映射。
+    got_pack = wait_for(lambda: overlay.level.winfo_manager() == "pack")
     check("FR-3.5 录音态电平条在布局里",
-          overlay.level.winfo_manager() == "pack",
+          got_pack,
           "manager=%r mapped=%s"
           % (overlay.level.winfo_manager(), overlay.level.winfo_ismapped()))
 
@@ -150,37 +177,77 @@ def _run(overlay: Overlay) -> None:
     # ---------- 有音量时电平条变长 ---------- #
     canvas_w = _wait_canvas_width(overlay)
     overlay.set_volume(0.9)
-    pump(0.3)
+    got_bar = wait_for(lambda: _bar_width(overlay) > 0)
     w1 = _bar_width(overlay)
     check("FR-3.5 收到音量后电平条画出来了",
-          w1 > 0,
+          got_bar and w1 > 0,
           "peak=0.9 → 条宽=%d px（电平条宽 %d px）" % (w1, canvas_w))
 
     # 音量更大 → 条更长
     overlay.set_volume(0.99)
-    pump(0.05)
+    wait_for(lambda: _bar_width(overlay) >= w1)
     w2 = _bar_width(overlay)
     check("FR-3.5 音量越大电平条越长",
           w2 >= w1,
           "peak=0.9 → %d px；peak=0.99 → %d px" % (w1, w2))
 
     # 静音 → 电平条**平滑**回落（不是瞬间消失，也不是永远不落）
-    # 衰减是**按时间**的（tau≈0.35 s），所以要给它一点时间。
-    overlay.set_volume(0.0)
-    pump(0.05)
-    w_mid = _bar_width(overlay)
-    pump(1.5)
-    w3 = _bar_width(overlay)
-    check("FR-3.5 静音后电平条平滑回落到 0",
-          w3 == 0,
-          "刚静音时条宽=%d px（还在缓慢下落）→ 1.5 s 后=%d px" % (w_mid, w3))
+    #
+    # ⚠️ 这里**不用墙钟**（``time.sleep(0.05)``）来测衰减 ——
+    # CI runner 上 50 ms 的 sleep 实际可能过了 1 秒以上，
+    # 于是「刚静音 50 ms」那一刻电平早就落完了 → 随机变红（实测踩过）。
+    #
+    # 改成**直接控制经过的时间**：把 ``_level_at`` 往回拨，
+    # 再让主线程跑一次 ``_draw_level``。这样「过了多久」是**确定的**。
+    def _level_after(dt: float) -> float:
+        """让电平从 1.0 静默衰减 dt 秒，返回衰减后的电平。"""
+        def work() -> None:
+            overlay._level = 1.0
+            overlay._level_target = 0.0
+            overlay._level_at = time.monotonic() - dt
+            overlay._draw_level()
+        _run_on_tk(overlay, work)
+        return overlay._level
+
+    lvl_50ms = _level_after(0.05)
     check("FR-3.5 静音后是**渐降**而不是瞬间消失",
-          w_mid > 0,
-          "静音 50 ms 后条宽=%d px（应为 0 才是瞬间消失，那不好看）" % w_mid)
+          0.0 < lvl_50ms < 1.0,
+          "静默 50 ms 后电平=%r（应是 0 与 1 之间的值；0 = 瞬间消失，1 = 根本没降）"
+          % lvl_50ms)
+
+    lvl_1s = _level_after(1.0)
+    check("FR-3.5 静音足够久后电平落到 0（不会永远挂着一条尾巴）",
+          lvl_1s == 0.0,
+          "静默 1 s 后电平=%r" % lvl_1s)
+
+    # 衰减是**按时间**的，不是按帧：同一段墙钟时间，分成 10 段算
+    # 和一次算，结果应该一致（否则就是「按帧衰减」那个 bug）。
+    #
+    # ⚠️ 每一帧的 dt 必须是 `total/steps` —— 所以 ``_level_at`` 要**逐帧前移**
+    # （``_draw_level`` 内部自己取 ``time.monotonic()`` 当"现在"，
+    # 减的是 ``_level_at``，所以要让它每帧都离"现在"恰好 dt 这么远）。
+    def _decay_in_steps(steps: int, total: float) -> float:
+        step = total / steps
+
+        def work() -> None:
+            overlay._level = 1.0
+            overlay._level_target = 0.0
+            for _ in range(steps):
+                overlay._level_at = time.monotonic() - step
+                overlay._draw_level()
+        _run_on_tk(overlay, work)
+        return overlay._level
+
+    one_step = _decay_in_steps(1, 0.1)
+    ten_steps = _decay_in_steps(10, 0.1)
+    check("FR-3.5 衰减按**时间**算而不是按帧算（分 10 帧与 1 帧结果一致）",
+          abs(one_step - ten_steps) < 0.02,
+          "1 帧=%r，10 帧=%r（差 %r；按帧衰减的话两者会差很多）"
+          % (one_step, ten_steps, abs(one_step - ten_steps)))
 
     # ---------- 非录音态不显示电平条 ---------- #
     overlay.set_state("thinking")
-    pump(0.3)
+    wait_for(lambda: overlay.level.winfo_manager() == "")
     check("FR-3.5 非录音态电平条离开布局",
           overlay.level.winfo_manager() == "",
           "manager=%r mapped=%s"
@@ -191,7 +258,7 @@ def _run(overlay: Overlay) -> None:
     # 只改配置、**不会把它放回来** —— 症状是「第一次录音有电平条，
     # 第二次开始就没了」。
     overlay.show_listening()
-    pump(0.4)
+    wait_for(lambda: overlay.level.winfo_manager() == "pack")
     check("FR-3.5 隐藏过一次后还能再显示出来（回归）",
           overlay.level.winfo_manager() == "pack",
           "manager=%r mapped=%s"
@@ -199,7 +266,7 @@ def _run(overlay: Overlay) -> None:
 
     # ---------- FR-3.6：error 状态可见 ---------- #
     overlay.show_error("识别服务连接失败：Connection refused")
-    pump(0.4)
+    wait_for(lambda: overlay.snapshot()[0] == "error")
     state, text = overlay.snapshot()
     check("FR-3.6 出错时状态变成 error",
           state == "error",
@@ -214,15 +281,15 @@ def _run(overlay: Overlay) -> None:
     # ---------- 录音过程中出错：悬浮窗**不能**自动消失 ---------- #
     # 录音中悬浮窗正显示着流式文字，自动隐藏会让用户以为程序挂了。
     overlay.show_listening()
-    pump(0.3)
+    wait_for(lambda: overlay.snapshot()[0] == "listening")
     overlay.show_error("中途出了个错", auto_hide=False)
-    pump(0.3)
+    wait_for(lambda: overlay.snapshot()[0] == "error")
     check("FR-3.6 录音中出错时悬浮窗保留（不自动隐藏）",
           overlay.visible,
           "visible=%s" % overlay.visible)
     # 而非录音态的独立错误，4 秒后应该自动收起
     overlay.show_error("独立的一条错误", auto_hide=True)
-    pump(0.3)
+    wait_for(lambda: overlay.snapshot()[0] == "error")
     check("FR-3.6 独立错误会安排自动隐藏（4 秒后收起）",
           overlay.visible,
           "刚显示时 visible=%s（4 秒后才该消失）" % overlay.visible)
@@ -240,9 +307,9 @@ def _run(overlay: Overlay) -> None:
     Overlay._draw_level = no_draw
     try:
         overlay.show_listening()
-        pump(0.4)
+        wait_for(lambda: overlay.level.winfo_manager() == "pack")
         overlay.set_volume(0.8)
-        pump(0.3)
+        wait_for(lambda: _bar_width(overlay) > 0, timeout=1.0)
         check("FR-3.5 阳性对照：不画电平条时断言会失败",
               _bar_width(overlay) == 0,
               "对照组条宽=%d（应为 0，说明对照组确实复现了「没有电平条」）"
@@ -261,7 +328,10 @@ def _run(overlay: Overlay) -> None:
     Overlay._apply = no_error_apply
     try:
         overlay.show_error("这条错误应该被吞掉")
-        pump(0.4)
+        # 坏实现会把这条消息**整个丢掉** —— 所以「状态变成 error」这件事
+        # **永远不会发生**。不能等它发生（那会一直等到超时），
+        # 只能等队列被消费掉（消息已被处理，只是被丢弃了）。
+        wait_for(lambda: overlay._q.empty(), timeout=2.0)
         state2, text2 = overlay.snapshot()
         check("FR-3.6 阳性对照：不处理 error 时断言会失败",
               state2 != "error" and "吞掉" not in text2,
