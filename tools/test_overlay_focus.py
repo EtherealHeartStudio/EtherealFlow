@@ -109,8 +109,15 @@ class FocusTest:
         弹窗、系统通知）。那不是悬浮窗的锅，却会让本用例随机变红
         （实测：偶发失败时焦点跑到 ``[Chrome_WidgetWin_1] 'Cherry Studio'``
         去了 —— 那是 Electron 应用的窗口，**不是**悬浮窗）。
+
+        ⚠️ 句柄为 **0** 的必须排除：0 表示「没有窗口」，
+        不是「我们的窗口」。CI runner 上没有交互式桌面会话，
+        前台/焦点句柄经常是 0 —— 不排除的话，
+        「基线就是 0」会被误判成「被悬浮窗抢走了」（实测：CI 上这条红了）。
         """
-        own = {self.overlay.hwnd, self.overlay.top_hwnd}
+        own = {h for h in (self.overlay.hwnd, self.overlay.top_hwnd) if h}
+        if not own:
+            return False
         return fg in own or focus in own
 
     @staticmethod
