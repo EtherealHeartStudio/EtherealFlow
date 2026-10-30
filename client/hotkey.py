@@ -135,9 +135,16 @@ class PollingHotkey:
             down = _all_down(self.groups)
             if down and not was_down:
                 self.pressed_keys = True
+                # ⚠️ ``active`` = 「当前正在录音」。
+                # 它决定 Esc 会不会触发取消 —— 必须由热键的按下/松开驱动。
+                # 之前这个字段**从来没被设成 True**（只有 tools/test_hotkey.py
+                # 手工设过），于是 Esc 取消在真实使用中**永不触发**：
+                # 需求文档 FR-1 写的「录音中按 Esc 取消本次输入」根本不存在。
+                self.active = True
                 self._fire(self.on_press)
             elif not down and was_down and self.pressed_keys:
                 self.pressed_keys = False
+                self.active = False
                 self._fire(self.on_release)
             was_down = down
 
@@ -259,9 +266,13 @@ class HookHotkey:
                 combo_now = all(any(v in self._down for v in g) for g in self.groups)
                 if combo_now and not self._combo:
                     self._combo = True
+                    # ⚠️ ``active`` = 「当前正在录音」，由组合键的按下/松开驱动。
+                    # 不设它的话 Esc 取消在真实使用中永不触发（详见 PollingHotkey._run）。
+                    self.active = True
                     self._fire(self.on_press)
                 elif not combo_now and self._combo:
                     self._combo = False
+                    self.active = False
                     self._fire(self.on_release)
 
                 if (down and vk == self.cancel_vk and self.active

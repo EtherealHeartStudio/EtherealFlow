@@ -364,11 +364,29 @@ def main() -> int:
     check("列出服务端模型", models == ["fake-model", "qwen2.5:7b"], repr(models))
     check("列模型走的是正确的路径", SEEN["get_path"].endswith("/v1/models"),
           SEEN["get_path"])
-    okc, msg = nokey.test_connection()
+    # ⚠️ probe_call=False：这两条测的是**文案**，不是连通性探测本身。
+    # 开启探测会额外发一次聊天请求，而这里的假服务端只实现了 models 接口。
+    # 「探测真的发了请求」由下面单独的用例覆盖。
+    okc, msg = nokey.test_connection(probe_call=False)
     check("测试连接：成功且指出找到了模型", okc and "已找到" in msg, msg)
     wrong = LlmClient(base_url=base, api_key="", model="拼错的模型名", timeout=5.0)
-    okc2, msg2 = wrong.test_connection()
+    okc2, msg2 = wrong.test_connection(probe_call=False)
     check("测试连接：模型名写错要明确指出来", okc2 and "没找到" in msg2, msg2)
+
+    # ⚠️ 「列表里有这个模型」≠「这个模型能用」。
+    # 实测踩过：代理端把模型列在 /v1/models 里，但实际调用返回
+    # usage_limit_reached（配额用尽）—— 只查列表的话，设置界面显示
+    # 「✓ 连通」，用户一用就失败。所以 test_connection 必须真发一次请求。
+    MODE["value"] = "500"
+    try:
+        okc3, msg3 = nokey.test_connection(probe_call=True)
+        check("测试连接：模型在列表里但实际调用失败 → 要报失败",
+              (not okc3) and "实际调用失败" in msg3, msg3)
+        okc4, msg4 = nokey.test_connection(probe_call=False)
+        check("测试连接：只看列表时仍算连通（models 接口正常）",
+              okc4 and "已找到" in msg4, msg4)
+    finally:
+        MODE["value"] = "ok"
 
     srv.shutdown()
     print("=" * 74)

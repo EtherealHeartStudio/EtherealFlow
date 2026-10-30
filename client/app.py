@@ -37,7 +37,7 @@ from .inject import default_injector
 from .llm import default_client
 from .overlay import Overlay
 from .settings_ui import SettingsWindow
-from .textutil import smart_join
+from .textutil import build_asr_context, smart_join
 from .translator import default_translator
 
 def emit(text: str) -> None:
@@ -96,8 +96,20 @@ class App:
         self.inject_enabled = str(cfg["inject"].get("mode", "clipboard")).lower() != "none"
         self.hotwords = list(cfg.get("hotwords") or [])
 
-    # -- 日志 -------------------------------------------------------------- #
+    def _begin_asr_session(self) -> None:
+        """开识别会话：context = 热词表 + 识别上下文。
 
+        ⚠️ 热词**必须**同时喂给识别引擎（FR-7「词典：热词列表，
+        传给识别引擎作为 context」）。v0.3.0 只把它喂给了 LLM ——
+        界面和 README 都写着会传给引擎，实际没有（BF-4）。
+        """
+        self.asr.begin_session(
+            language=self.cfg["asr"].get("language"),
+            context=build_asr_context(self.hotwords,
+                                      self.cfg["asr"].get("context", "")),
+        )
+
+    # -- 日志 -------------------------------------------------------------- #
     def log(self, msg: str) -> None:
         line = "[%s] %s" % (time.strftime("%H:%M:%S"), msg)
         self.log_lines.append(line)
@@ -147,13 +159,24 @@ class App:
         self.log("分段完成（%d 字），累计 %d 字，继续听…" % (len(part), len(self._prefix)))
         self.overlay.set_text(self._prefix)
         if self.session_active:
-            self.asr.begin_session(language=self.cfg["asr"].get("language"),
-                                   context=self.cfg["asr"].get("context", ""))
+            # ⚠️ keep_end_pending=True：用户可能**恰好在分段途中松了手**
+            # （end_session 发现正在轮转，就记下「想结束」等着）。
+            # 这时重开新会话不能把这个标记抹掉 ——
+            # 抹掉的话，新会话的 final 会被当成普通的一段，
+            # 最后一段的内容就丢了（实测整个后半段消失）。
+            self.asr.begin_session(
+                language=self.cfg["asr"].get("language"),
+                context=build_asr_context(self.hotwords,
+                                          self.cfg["asr"].get("context", "")),
+                keep_end_pending=True)
 
     def _on_final(self, msg: dict) -> None:
         # 分段过的话，整句 = 已落定前缀 + 最后一段
         self.final_text = smart_join([self._prefix, msg.get("text") or ""])
         self._rotating = False
+        # 轮转途中松手时，session_active 被特意保持 True（好让新会话开起来），
+        # 这里收尾时置回去 —— 否则下次按热键会被「已在录音中」挡住。
+        self.session_active = False
         self.overlay.set_text(self.final_text)
         stats = {k: v for k, v in msg.items() if k not in ("type", "text")}
         self.log("FINAL: %s | %s" % (self.final_text, stats))
@@ -251,8 +274,7 @@ class App:
         self.done.clear()
         self.log("按下热键 → 开始采集")
         self.overlay.show_listening()
-        self.asr.begin_session(language=self.cfg["asr"].get("language"),
-                               context=self.cfg["asr"].get("context", ""))
+        self._begin_asr_session()
         if self.translate_enabled:
             self.translator = default_translator(
                 self.llm, self.cfg.get("translate"),
@@ -283,20 +305,44 @@ class App:
     def _on_release(self) -> None:
         if not self.session_active:
             return
-        self.session_active = False
         self._stop_mic()
         self.log("松开热键 → 请求最终结果")
         self.overlay.set_state("thinking")
+        # ⚠️ **轮转途中松手**要特殊处理。
+        # 此刻服务端正在 finish 上一段（要几秒），扣住的音频还在暂存区。
+        # 如果这里就把 session_active 置 False，那么 _on_segment_final 里
+        # 「if self.session_active: 开新会话」就不会执行 ——
+        # 扣住的音频永远发不出去，**后半段整个消失**。
+        # 正确做法：让 asr 记下「想结束」（end_session 内部会处理），
+        # 等新会话的 final 回来再收尾。
         self.asr.end_session()
+        if not self._rotating:
+            # 不是在轮转途中 → 正常路径，等 final 就行
+            self.session_active = False
+        else:
+            # 轮转途中松手：asr 已记下「想结束」。
+            # session_active **保持 True** —— 否则 _on_segment_final 里
+            # 「if self.session_active: 开新会话」不执行，
+            # 扣住的音频就永远发不出去（后半段整个消失）。
+            # 新会话的 final 回来后，_on_final 会把 session_active 置回 False。
+            self.log("（正处在分段收尾，稍后继续收尾）")
 
     def _on_cancel(self) -> None:
+        """Esc → 取消本次输入：**一个字都不注入**。"""
         if not self.session_active:
             return
         self.session_active = False
         self._stop_mic()
+        # 清掉已累积的文本 —— 取消就是「当没说过」，
+        # 后面不能再拿这些字去注入。
+        self._prefix = ""
+        self.final_text = ""
+        self._rotating = False
         self.log("Esc → 取消本次输入")
         self.asr.cancel_session()
+        self.overlay.set_state("done")
         self.overlay.hide()
+        self.done.set()
 
     # -- 运行 -------------------------------------------------------------- #
 

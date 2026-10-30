@@ -63,6 +63,14 @@ TESTS: list[tuple[str, str, bool]] = [
     # 缺识别服务时它们会明确 SKIP 并退出 0（见 tools/_deps.py）。
     ("完整闭环（识别→修正→注入）", "tools/test_closed_loop.py", True),
     ("翻译接入主流程", "tools/test_translate_flow.py", True),
+    # ↓ S2 新增的三个回归用例。每一个都验证过一个**已发布版本里存在**的缺陷：
+    #   · 轮转丢内容（说超 30 秒丢 32%）
+    #   · Esc 取消是死代码（文档写了，代码里从不触发）
+    #   · 热词没进识别引擎（界面和 README 都说传了，实际没有）
+    # 缺识别服务时它们会明确 SKIP 并退出 0（见 tools/_deps.py）。
+    ("长语音轮转不丢内容", "tools/test_rotate_no_loss.py", True),
+    ("Esc 取消不注入", "tools/test_cancel_no_inject.py", True),
+    ("热词到达识别引擎", "tools/test_hotwords_reach_asr.py", False),
 ]
 
 
