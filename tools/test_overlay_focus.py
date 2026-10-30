@@ -99,6 +99,20 @@ class FocusTest:
         """
         self.results.append((name, "skip", detail))
 
+    def _stolen_by_overlay(self, fg: int, focus: int) -> bool:
+        """焦点是不是被**悬浮窗自己**拿走了。
+
+        这是 FR-3.1 的判据，也是本用例的核心断言。
+
+        ⚠️ 不要写成「焦点跟基线不一样就算抢」—— 那太严：
+        采样期间**别的程序**也可能抢走焦点（比如本机的 Cherry Studio
+        弹窗、系统通知）。那不是悬浮窗的锅，却会让本用例随机变红
+        （实测：偶发失败时焦点跑到 ``[Chrome_WidgetWin_1] 'Cherry Studio'``
+        去了 —— 那是 Electron 应用的窗口，**不是**悬浮窗）。
+        """
+        own = {self.overlay.hwnd, self.overlay.top_hwnd}
+        return fg in own or focus in own
+
     @staticmethod
     def _wait_visible(hwnd: int, timeout: float = 4.0) -> float:
         """等窗口真正被映射出来，返回等待的毫秒数；超时返回 -1。"""
@@ -171,26 +185,67 @@ class FocusTest:
                        else "4 s 内始终 IsWindowVisible=0：窗口没有被映射出来")
 
             # 边灌文字边采样
+            #
+            # ⚠️ 判据是「**悬浮窗没有抢走焦点**」，不是「焦点一个字都没变」。
+            #
+            # 后者太严：采样期间**别的程序**也可能抢走焦点（比如本机的
+            # Cherry Studio 弹个窗、系统通知）。那不是悬浮窗的锅，
+            # 却会让本用例随机变红（实测：偶发失败时焦点跑到
+            # `[Chrome_WidgetWin_1] 'Cherry Studio'` 去了 —— 那是
+            # Electron 应用的窗口，**不是**悬浮窗）。
+            #
+            # 所以判据改成：**前台/焦点从未变成悬浮窗自己**。
+            # 这才是产品需求（FR-3.1）真正要保证的那件事。
+            own = {self.overlay.hwnd, self.overlay.top_hwnd}
             fg_stolen, focus_stolen = [], []
+            fg_moved, focus_moved = [], []
             for i, text in enumerate(SAMPLE_TEXT):
                 self.overlay.set_text(text)
                 time.sleep(0.4)
                 fg, _tid, focus = w32.foreground_focus_state()
-                if fg != base[0]:
-                    fg_stolen.append("第%d次采样：前台 → %s" % (i + 1, describe(fg)))
-                if focus != base[2]:
-                    focus_stolen.append("第%d次采样：焦点 → %s" % (i + 1, describe(focus)))
+                if fg in own:
+                    fg_stolen.append("第%d次采样：前台变成悬浮窗自己 → %s"
+                                     % (i + 1, describe(fg)))
+                elif fg != base[0]:
+                    fg_moved.append("第%d次采样：前台 → %s（**别的程序**抢的）"
+                                    % (i + 1, describe(fg)))
+                if focus in own:
+                    focus_stolen.append("第%d次采样：焦点变成悬浮窗自己 → %s"
+                                        % (i + 1, describe(focus)))
+                elif focus != base[2]:
+                    focus_moved.append("第%d次采样：焦点 → %s（**别的程序**抢的）"
+                                       % (i + 1, describe(focus)))
+            # 阳性对照（**与本环境无关**）：判据本身必须能识别「被悬浮窗抢走」。
+            # 上面的阳性对照（普通窗口抢焦点）在有前台锁的环境里会 SKIP ——
+            # 那说明不了「本用例的判据在悬浮窗真的抢了焦点时会变红」。
+            # 这里直接用悬浮窗自己的句柄喂给判据，**必须**判成「被抢」。
+            own_hwnd = self.overlay.top_hwnd or self.overlay.hwnd
+            self.check("阳性对照：判据能识别「焦点被悬浮窗抢走」",
+                       self._stolen_by_overlay(own_hwnd, 0)
+                       and self._stolen_by_overlay(0, own_hwnd)
+                       and not self._stolen_by_overlay(base[0], base[2]),
+                       "own=%r 判据(own,0)=%s 判据(0,own)=%s 判据(基线)=%s"
+                       % (own_hwnd,
+                          self._stolen_by_overlay(own_hwnd, 0),
+                          self._stolen_by_overlay(0, own_hwnd),
+                          self._stolen_by_overlay(base[0], base[2])))
             n = len(SAMPLE_TEXT)
-            self.check("文字流式增长期间前台窗口始终未变", not fg_stolen,
-                       "; ".join(fg_stolen) or "%d 次采样全部保持" % n)
-            self.check("文字流式增长期间键盘焦点始终未被抢走", not focus_stolen,
-                       "; ".join(focus_stolen) or "%d 次采样全部保持" % n)
+            self.check("文字流式增长期间前台窗口从未变成悬浮窗自己",
+                       not fg_stolen,
+                       "; ".join(fg_stolen)
+                       or ("%d 次采样全部保持" % n
+                           + ("；期间 %s" % "; ".join(fg_moved) if fg_moved else "")))
+            self.check("文字流式增长期间键盘焦点从未变成悬浮窗自己",
+                       not focus_stolen,
+                       "; ".join(focus_stolen)
+                       or ("%d 次采样全部保持" % n
+                           + ("；期间 %s" % "; ".join(focus_moved) if focus_moved else "")))
 
             self.overlay.set_state("thinking")
             time.sleep(0.4)
             fg, _tid, focus = w32.foreground_focus_state()
             self.check("切换状态（🎙→✨）后仍未抢焦点",
-                       fg == base[0] and focus == base[2],
+                       not self._stolen_by_overlay(fg, focus),
                        "前台=%s 焦点=%s" % (describe(fg), describe(focus)))
 
             # 截图（人眼确认视觉效果）
@@ -230,6 +285,11 @@ class FocusTest:
                 w32.force_foreground(ctl_hwnd)
                 time.sleep(0.5)
                 fg2, _t2, focus2 = w32.foreground_focus_state()
+                # 阳性对照的判据必须与上面**对称**：一个**普通可激活**窗口
+                # 抢走焦点时，检测器要能发现「焦点变成了某个别的窗口」。
+                # （如果这里还按「焦点一个字都没变」来判，那么在有前台锁的
+                #   环境里它会 SKIP —— 而现在上面改用「变成了悬浮窗自己」
+                #   之后，检测器的判据必须是「变成了**某个**窗口」才对得上。）
                 detected = (fg2 != base[0]) or (focus2 != base[2])
                 if detected:
                     self.check("阳性对照：检测器能发现真正的抢焦点行为", True,
