@@ -34,6 +34,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 from pathlib import Path
@@ -74,8 +75,9 @@ class ConfigWatcher:
         self.interval = float(interval)
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        self._last_mtime: Optional[float] = None
-        self._last_size: Optional[int] = None
+        #: 上一次**成功处理**过的内容指纹（sha256）。见 _load 的说明：
+        #: 不用 (mtime, size) —— 那样会漏掉「等长内容」的改动。
+        self._last_digest: Optional[str] = None
         #: 串行化 poll()（监视线程与外部调用可能同时进来，见 poll 的说明）
         self._lock = threading.Lock()
         #: 已经回调过几次（测试用）
@@ -86,7 +88,10 @@ class ConfigWatcher:
     def start(self) -> None:
         if self._thread is not None or self.path is None:
             return
-        self._last_mtime, self._last_size = self._stat()
+        # 记下**当前**内容的指纹 —— 启动前就已经存在的配置不算「变化」，
+        # 不该触发回调（否则客户端一启动就会拿配置重载一遍）。
+        _cfg, digest = self._load()
+        self._last_digest = digest
         self._thread = threading.Thread(target=self._loop, daemon=True,
                                         name="config-watcher")
         self._thread.start()
@@ -98,15 +103,6 @@ class ConfigWatcher:
             self._thread = None
 
     # -- 内部 -------------------------------------------------------------- #
-
-    def _stat(self) -> tuple[Optional[float], Optional[int]]:
-        if self.path is None:
-            return None, None
-        try:
-            st = self.path.stat()
-            return st.st_mtime, st.st_size
-        except OSError:
-            return None, None
 
     def _loop(self) -> None:
         while not self._stop.wait(self.interval):
@@ -120,33 +116,30 @@ class ConfigWatcher:
 
         单独拆出来是为了能**同步**调用（测试里不等 2 秒）。
 
-        ⚠️ 整个过程要在**一把锁**里完成，而且 ``_last_mtime`` 只能在
+        ⚠️ 整个过程要在**一把锁**里完成，而且 ``_last_digest`` 只能在
         **成功加载并回调之后**才更新。两个原因：
 
         1. **竞态**：监视线程和外部调用可能同时进来。不加锁的话，
-           一个线程更新了 ``_last_mtime`` 但回调还没跑，另一个线程就
+           一个线程更新了 ``_last_digest`` 但回调还没跑，另一个线程就
            看到「没变化」直接返回 —— 回调于是被**吞掉**（实测：改成
            「已处理」但回调一次都没发生）。
         2. **不能因为一次读失败就丢掉这次改动**：设置界面是
            ``write_text`` 写文件 —— 先截断、再写。监视线程正好落在这个
            窗口里时，读到的是**半个文件**（JSON 解析失败）。
-           如果这时就把 ``_last_mtime`` 更新掉，这次改动就**永远丢了**，
+           如果这时就把 ``_last_digest`` 更新掉，这次改动就**永远丢了**，
            用户改了设置却没生效，而且再也等不到。
-           所以：**读失败就不更新 mtime**，下一轮重试。
+           所以：**读失败就不更新 digest**，下一轮重试。
         """
         if self.path is None:
             return False
         with self._lock:
-            mtime, size = self._stat()
-            if mtime is None:
+            cfg, digest = self._load()
+            if cfg is None or digest is None:
+                # 读不到/读坏了 → **不更新 digest**，下一轮再试
                 return False
-            if mtime == self._last_mtime and size == self._last_size:
+            if digest == self._last_digest:
                 return False
-            cfg = self._load()
-            if cfg is None:
-                # 读不到/读坏了 → **不更新 mtime**，下一轮再试
-                return False
-            self._last_mtime, self._last_size = mtime, size
+            self._last_digest = digest
             self.reload_count += 1
             try:
                 self.on_change(cfg)
@@ -154,21 +147,44 @@ class ConfigWatcher:
                 pass
             return True
 
-    def _load(self) -> Optional[dict]:
+    def _load(self) -> tuple[Optional[dict], Optional[str]]:
         """读配置。**坏文件不能让监视线程死掉** —— 读到 None 就跳过这一轮。
+
+        返回 ``(配置, 内容指纹)``。指纹是**内容的哈希**。
 
         这里不直接用 ``config.load_config``：那个函数在文件损坏时会
         **回退默认值**，那样会把用户刚改好的设置**整个冲掉**。
         这里宁可跳过，也不覆盖。
+
+        ## 为什么指纹用内容哈希，而不是 (mtime, size)
+
+        以前用 ``(mtime, size)`` 判断「文件变没变」。这有两个真实的漏检：
+
+        1. **等长的内容改不动**：``{"llm": {"model": "m1"}}`` 和
+           ``{"llm": {"model": "m2"}}`` **字节数完全一样**（24 字节）。
+           如果文件系统的 mtime 粒度粗（CI runner 上实测会这样），
+           两次写入的 mtime 可能相同 → 改动被**静默丢弃**，
+           用户改了设置却没生效。
+        2. **mtime 粒度**：某些文件系统只精确到秒。同一秒内的两次写入，
+           mtime 一样 → 后一次被当成「没变」。
+
+        改成内容哈希就没有这些问题：**内容一样才算没变**，
+        字节数一样但内容不同，一定能认出来。
+
+        哈希用 sha256 —— 配置文件才几 KB，2 秒一次完全不是负担。
         """
         try:
-            raw = self.path.read_text(encoding="utf-8")
-            data = json.loads(raw)
-        except (OSError, ValueError):
-            return None
+            raw = self.path.read_bytes()
+        except OSError:
+            return None, None
+        digest = hashlib.sha256(raw).hexdigest()
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return None, None
         if not isinstance(data, dict):
-            return None
-        return data
+            return None, None
+        return data, digest
 
 
 def describe_effects() -> dict[str, str]:

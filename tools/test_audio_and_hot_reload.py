@@ -316,6 +316,54 @@ def check_bf13() -> None:
           "回调次数=%d" % len(got_cfgs))
     watcher.stop()
 
+    # ---------- 关键回归：**等长**的内容改动也要被认出来 ----------
+    #
+    # 旧实现用 ``(mtime, size)`` 判断「文件变没变」，有两个真实的漏检：
+    #   1. 等长的内容改不动 —— ``{"llm": {"model": "m1"}}`` 与
+    #      ``{"llm": {"model": "m2"}}`` **字节数完全一样**；
+    #   2. 某些文件系统的 mtime 只精确到秒 —— 同一秒内的两次写入看不出来。
+    #
+    # 这不是测试的边角料 —— 用户把修正模式从 ``light`` 改成 ``deep``
+    # （都是 4 个字符）、超时从 ``15`` 改成 ``12``，**都是等长的**。
+    # 旧实现下这些改动会被**静默丢弃**：用户改了设置，客户端却当没改。
+    tmp3 = Path(tempfile.gettempdir()) / "cv-hotreload-samelen.json"
+    if tmp3.exists():
+        tmp3.unlink()
+    got3: list[dict] = []
+    w3 = ConfigWatcher(tmp3, got3.append, interval=0.05)
+    # 先 start（此时文件还不存在）—— start() 会把**当前**内容记成基线，
+    # 所以「启动前就有的配置」不算变化（客户端一启动不该白重载一遍）。
+    w3.start()
+    tmp3.write_text(json.dumps({"llm": {"model": "m1"}}), encoding="utf-8")
+    w3.poll()
+    same_len = json.dumps({"llm": {"model": "m2"}})
+    check("BF-13.1 等长内容的改动前：两版字节数确实相同",
+          len(same_len) == len(json.dumps({"llm": {"model": "m1"}})),
+          "m1 与 m2 都是 %d 字节" % len(same_len))
+
+    # ⚠️ **把 mtime 强行设成和上一版完全一样** ——
+    # 模拟「文件系统 mtime 粒度粗」（某些网络盘、CI runner 的文件系统、
+    # FAT32 都是秒级粒度）。
+    #
+    # 不这么做的话，这条用例在**本机**永远通过（本机 mtime 是 100ns 粒度），
+    # 抓不到「靠 (mtime, size) 判断变化」的缺陷 —— 那缺陷只在 CI 上暴露。
+    # 固定住 mtime 之后，用例结果就与文件系统的行为**无关**了。
+    import os as _os
+    stamp = tmp3.stat().st_mtime
+    tmp3.write_text(same_len, encoding="utf-8")
+    _os.utime(tmp3, (stamp, stamp))
+    check("BF-13.1 模拟粗粒度文件系统：mtime 与字节数都没变",
+          tmp3.stat().st_mtime == stamp
+          and tmp3.stat().st_size == len(same_len),
+          "mtime=%r 字节数=%d（与上一版完全一样）"
+          % (tmp3.stat().st_mtime, tmp3.stat().st_size))
+
+    w3.poll()
+    check("BF-13.1 mtime 与字节数都没变时，内容改动仍能被认出来",
+          len(got3) == 2 and got3[-1]["llm"]["model"] == "m2",
+          "回调次数=%d 内容=%s" % (len(got3), got3))
+    w3.stop()
+
     # ---------- 关键回归：一次读失败**不能**永久丢掉这次改动 ----------
     # 设置界面写文件是「先截断、再写」—— 监视线程正好落在这个窗口里时，
     # 读到的是半个文件（JSON 解析失败）。
@@ -336,7 +384,7 @@ def check_bf13() -> None:
         """第一次读失败（模拟写到一半被读到），之后正常。"""
         calls["n"] += 1
         if calls["n"] == 1:
-            return None
+            return None, None
         return real_load()
 
     w2._load = flaky_load
