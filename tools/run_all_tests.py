@@ -46,6 +46,9 @@ def note(text: str) -> None:
 TESTS: list[tuple[str, str, bool]] = [
     ("签名审计", "tools/test_win32_signatures.py", False),
     ("配置往返", "tools/test_settings.py", False),
+    # ↓ S4 新增：``deep_merge`` 改真深拷贝（BF-5）+ 逐字段类型校验（BF-6）。
+    # 坏配置以前会崩在启动（BF-6），而浅拷贝会污染全局默认值（BF-5）。
+    ("配置深拷贝+类型校验", "tools/test_config.py", False),
     ("LLM 失败分类", "tools/test_llm.py", False),
     ("增量翻译", "tools/test_translator.py", False),
     ("音频降级路径", "tools/test_audio_fallback.py", False),
@@ -71,6 +74,13 @@ TESTS: list[tuple[str, str, bool]] = [
     ("长语音轮转不丢内容", "tools/test_rotate_no_loss.py", True),
     ("Esc 取消不注入", "tools/test_cancel_no_inject.py", True),
     ("热词到达识别引擎", "tools/test_hotwords_reach_asr.py", False),
+    # ↓ S4 新增。每一个都验证一个**已发布版本里存在**的缺陷：
+    #   · 麦克风尾部音频每次都丢（松手前没 flush）
+    #   · 麦克风设备只能手改配置文件（序号会漂移，选错就没反应）
+    #   · 设置改完必须重启才生效（LLM 客户端不会热重建）
+    #   · 悬浮窗没有音量电平条，也没有 error 状态（出错只有日志里看得到）
+    ("麦克风设备+设置热更新", "tools/test_audio_and_hot_reload.py", False),
+    ("悬浮窗电平条+错误状态", "tools/test_overlay_states.py", True),
 ]
 
 
