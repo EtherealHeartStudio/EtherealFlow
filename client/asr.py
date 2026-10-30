@@ -209,8 +209,12 @@ class AsrClient:
     def _run(self) -> None:
         backoff = 0.5
         while not self._stop.is_set():
+            # 本次连接用的地址。设置界面改了地址时（热更新），
+            # ``self.url`` 会变 —— 记下来，``_pump`` 发现地址变了就退出，
+            # 外层循环用新地址重连。
+            conn_url = self.url
             try:
-                with ws_connect(self.url, open_timeout=5, close_timeout=2) as ws:
+                with ws_connect(conn_url, open_timeout=5, close_timeout=2) as ws:
                     self.connected = True
                     self.last_error = ""
                     self.on_status("connected")
@@ -229,7 +233,7 @@ class AsrClient:
                         self._drop_pending_starts()
                         ws.send(json.dumps({"type": "start", **self._session_args},
                                            ensure_ascii=False))
-                    self._pump(ws)
+                    self._pump(ws, conn_url)
             except Exception as exc:  # noqa: BLE001
                 self.connected = False
                 msg = "%s" % exc
@@ -239,6 +243,9 @@ class AsrClient:
                     self.on_status("disconnected")
             if self._stop.is_set():
                 break
+            # 地址变了（热更新）→ 立刻用新地址重连，不走退避等待
+            if self.url != conn_url:
+                continue
             time.sleep(backoff)
             backoff = min(backoff * 2, 5.0)
         self.connected = False
@@ -264,8 +271,12 @@ class AsrClient:
         for item in kept:
             self._q.put(item)
 
-    def _pump(self, ws) -> None:  # noqa: ANN001
+    def _pump(self, ws, conn_url: str = "") -> None:  # noqa: ANN001
         while not self._stop.is_set():
+            # 设置界面改了识别服务地址（热更新）→ 立刻断开重连，
+            # 别在旧连接上继续跑。
+            if conn_url and self.url != conn_url:
+                return
             # 1) 发：**每轮最多发这么多帧就回去收一次**。
             #    如果一次性把积压全灌进 socket，``ws.send`` 会在对方处理不过来时阻塞，
             #    期间收不到服务端的 keepalive ping，就会被当成死连接断开

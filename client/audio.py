@@ -36,6 +36,93 @@ def default_input_device() -> Optional[int]:
         return None
 
 
+def _name_tokens(name: str) -> set[str]:
+    """把设备名拆成「有意义的小写词」。
+
+    ``"Microphone (Realtek Audio)"`` → ``{"microphone", "realtek", "audio"}``
+
+    为什么要拆词而不是直接比子串 —— 同一个物理设备在不同机器/不同时刻
+    上报的**名字会重排**：``"Realtek Microphone"`` 与
+    ``"Microphone (Realtek Audio)"`` 互相都不是子串，但词集合高度重合。
+    """
+    import re
+    raw = re.split(r"[^0-9a-zA-Z一-鿿]+", (name or "").lower())
+    # 去掉没有信息量的词：它们在每个设备名里都出现
+    stop = {"audio", "device", "input", "output", "mic", "microphone",
+            "the", "of", "and", "on", "usb", "设备", "麦克风", "输入", "输出"}
+    return {t for t in raw if t and t not in stop}
+
+
+def _names_match(a: str, b: str) -> bool:
+    """两个设备名是不是指同一个设备。
+
+    三级判定，从严到宽：
+    1. 完全相等；
+    2. 一方是另一方的子串（``"Realtek Mic"`` vs ``"Realtek Microphone"``）；
+    3. 词集合有交集且一方包含另一方（**处理词序变化**：
+       ``"Realtek Microphone"`` vs ``"Microphone (Realtek Audio)"``）。
+
+    第 3 条要求**包含**而不是只要有交集 —— 否则 ``"USB Mic"`` 会和
+    ``"USB Speaker"`` 误判成同一个设备。
+    """
+    a_s = (a or "").strip().lower()
+    b_s = (b or "").strip().lower()
+    if not a_s or not b_s:
+        return False
+    if a_s == b_s:
+        return True
+    if a_s in b_s or b_s in a_s:
+        return True
+    ta, tb = _name_tokens(a), _name_tokens(b)
+    if not ta or not tb:
+        return False
+    return ta.issubset(tb) or tb.issubset(ta)
+
+
+#: 对外名字（settings_ui 也用同一套判据 ——
+#: 界面认得出设备、运行时却认不出的话，用户选的是一个、用的另一个）。
+matches_device_name = _names_match
+
+
+def resolve_input_device(index: Optional[int] = None,
+                         name: str = "") -> Optional[int]:
+    """按「名称优先、序号兜底」解析出实际要用的输入设备序号。
+
+    **为什么不能只存序号** —— 设备序号会漂移：
+    插拔一次 USB 声卡、换个蓝牙耳机、系统的默认设备变了，
+    同一个物理麦克风的序号就可能变。EtherealLive 的 P9 计划里明确记了这个坑
+    （「同一支麦在重启后换了序号」）。
+
+    所以配置里存**两个字段**：``audio.device``（序号）和
+    ``audio.device_name``（名称）。启动时：
+    1. 名称能对上 → 用当前的序号（跟着名字走，序号变了也不怕）；
+    2. 名称对不上（设备拔了/换了）→ 退回存下来的序号；
+    3. 都没有 → 用系统默认设备。
+
+    名称匹配不要求完全相等 —— 不同机器上报的设备名常带前后缀差异或
+    词序变化（``Microphone (Realtek Audio)`` vs ``Realtek Microphone``），
+    详见 ``_names_match``。
+    """
+    devices = list_input_devices()
+    if not devices:
+        return index
+
+    wanted = (name or "").strip()
+    if wanted:
+        # 第一轮：完全相等（最严格，最不会认错）
+        for idx, dev_name in devices:
+            if dev_name == wanted:
+                return idx
+        # 第二轮：模糊匹配（子串 / 词集合包含）
+        for idx, dev_name in devices:
+            if _names_match(wanted, dev_name):
+                return idx
+
+    if index is not None and 0 <= index < len(sd.query_devices()):
+        return index
+    return default_input_device()
+
+
 def _resample(x: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
     if src_rate == dst_rate or x.size == 0:
         return x
@@ -133,6 +220,15 @@ class MicCapture:
         if self._worker is not None:
             self._worker.join(timeout=1.0)
             self._worker = None
+        # ⚠️ **必须 flush**：采集是按整块（160 ms）切分的，
+        # 用户松手时缓冲区里往往还剩**不足一块**的尾巴 ——
+        # 不吐出去就等于每次都丢掉最后那点音（实测最多 160 ms）。
+        # flush 要在 worker 退出**之后**做：那时不会再有新的数据进来，
+        # 也不存在与 worker 争抢 _buf 的问题。
+        try:
+            self.flush()
+        except Exception:  # noqa: BLE001 - 尾巴丢了也不能影响收尾
+            pass
 
     # -- 内部 -------------------------------------------------------------- #
 

@@ -20,7 +20,7 @@ from tkinter import messagebox, ttk
 from typing import Any, Callable, Optional
 
 from . import win32 as w32
-from .audio import list_input_devices
+from .audio import list_input_devices, matches_device_name
 from .config import (DEFAULT_CONFIG, DEFAULT_LLM_MAX_TOKENS, DEFAULT_LLM_TIMEOUT,
                       load_config, save_config)
 from .correction_modes import (DEFAULT_MODE_ID, all_modes, custom_modes,
@@ -35,6 +35,24 @@ HOTKEY_BACKENDS = {"轮询 GetAsyncKeyState（兼容性好）": "polling",
                    "低级键盘钩子 WH_KEYBOARD_LL（能吞 Win 键）": "hook"}
 TARGET_LANGS = {"自动（中→英 / 英→中）": "auto", "英文": "English",
                 "中文": "Chinese", "日文": "Japanese", "韩文": "Korean"}
+
+#: 麦克风下拉框里的「跟随系统默认」那一项。
+#: 它的值是空串 —— 表示不指定设备，用系统默认。
+AUDIO_DEVICE_DEFAULT = "（跟随系统默认）"
+
+#: 界面底部常驻的说明：**哪些改完立即生效、哪些要重启**（BF-13.3）。
+#:
+#: 不写清楚的话，用户改完热键发现没反应，会以为程序坏了。
+EFFECTS_HELP = (
+    "已立即生效（不用重启）：\n"
+    "  · 修正 / 翻译参数（模型、地址、Key、超时、生成上限、模式）\n"
+    "  · 注入方式、剪贴板保护\n"
+    "  · 热词、识别语言与上下文、分段时长\n"
+    "  · 麦克风设备\n\n"
+    "需要重启客户端才生效：\n"
+    "  · 录音快捷键\n"
+    "  · 悬浮窗尺寸与透明度"
+)
 
 
 class SettingsWindow:
@@ -361,6 +379,20 @@ class SettingsWindow:
         self._row(f, "识别上下文",
                   lambda p: ttk.Entry(p, textvariable=self._var("asr_context")),
                   "额外提示（热词另有专门分组）")
+        self._row(f, "单段最长（秒）",
+                  lambda p: ttk.Entry(p, textvariable=self._var("asr_max_utterance")),
+                  "一句话超过这个长度就自动分段续传。默认 30；"
+                  "调大能减少分段次数，但识别服务要一直保持会话")
+        # --- 麦克风设备 ---
+        # FR-2 要求「设备可选（设置里列出输入设备）」，v0.3.0 只在命令行
+        # 有 --list-devices / --device，设置界面里**没有** —— 只能手改配置文件。
+        # ⚠️ 存的是「序号 + 名称」两个字段：设备序号会漂移（插拔 USB 声卡、
+        # 换蓝牙耳机），只存序号会导致下次开机选错设备。详见 audio.resolve_input_device。
+        self._row(f, "麦克风",
+                  lambda p: ttk.Combobox(p, state="readonly",
+                                         values=self._device_choices(),
+                                         textvariable=self._var("audio_device")),
+                  "选错了会导致「按了热键没反应」—— 很多机器的默认录音设备是虚拟声卡")
 
         # --- 修正 --- #
         # 内容会随自定义模式增减而变高，所以这一页是可滚动的
@@ -438,6 +470,10 @@ class SettingsWindow:
         self._row(f, "超时（秒）",
                   lambda p: ttk.Entry(p, textvariable=self._var("llm_timeout")),
                   "本机小模型首次调用要加载权重，可适当调大")
+        self._row(f, "生成上限（tokens）",
+                  lambda p: ttk.Entry(p, textvariable=self._var("llm_max_tokens")),
+                  "推理模型会先花这个额度思考再给答案；调太小会「修正一直失败」。"
+                  "默认 %d" % DEFAULT_LLM_MAX_TOKENS)
 
         self.llm_status = ttk.Label(f, text="", foreground="#777", wraplength=800,
                                     justify="left")
@@ -488,6 +524,13 @@ class SettingsWindow:
         ttk.Button(bar, text="取消", command=self.root.destroy).pack(side="right", padx=4)
         ttk.Button(bar, text="保存", command=self._save).pack(side="right", padx=4)
 
+        # --- 生效范围说明（BF-13.3）--- #
+        # 常驻在窗口底部：用户改任何一项之前就能看到「这个改完要不要重启」。
+        # 不写清楚的话，用户改完热键发现没反应，会以为程序坏了。
+        ttk.Label(self.root, text=EFFECTS_HELP, foreground="#666",
+                  justify="left", wraplength=840).pack(
+            anchor="w", padx=12, pady=(0, 6))
+
     # -- 绑定数据 ---------------------------------------------------------- #
 
     @staticmethod
@@ -497,8 +540,50 @@ class SettingsWindow:
                 return label
         return default_key
 
+    # -- 麦克风设备 ------------------------------------------------------- #
+
+    def _device_choices(self) -> list[str]:
+        """麦克风下拉框的选项：默认项 + 所有输入设备。
+
+        显示的是**设备名**（用户认得），序号靠名字反查 ——
+        序号会漂移，名字不会。
+        """
+        choices = [AUDIO_DEVICE_DEFAULT]
+        try:
+            for _idx, name in list_input_devices():
+                choices.append(name)
+        except Exception:  # noqa: BLE001 - 没有音频设备时也要能开设置界面
+            pass
+        return choices
+
+    def _pick_device(self, index: Optional[int], name: str) -> str:
+        """把配置里的（序号, 名称）翻译成下拉框里该显示的那一项。
+
+        优先按**名称**找（序号漂移了也能认出来）；
+        名称找不到才退回按序号找；都没有就显示「跟随系统默认」。
+        """
+        if not name and index is None:
+            return AUDIO_DEVICE_DEFAULT
+        try:
+            devices = list_input_devices()
+        except Exception:  # noqa: BLE001
+            return AUDIO_DEVICE_DEFAULT
+        for _idx, dev_name in devices:
+            if dev_name == name:
+                return dev_name
+        if name:
+            # 模糊匹配（子串 / 词集合包含，处理词序变化）——
+            # 与 audio.resolve_input_device 用的是**同一套**判据，
+            # 否则界面认得出设备、运行时却认不出（选的是一个、用的另一个）。
+            for _idx, dev_name in devices:
+                if matches_device_name(name, dev_name):
+                    return dev_name
+        for idx, dev_name in devices:
+            if idx == index:
+                return dev_name
+        return AUDIO_DEVICE_DEFAULT
+
     def apply(self, cfg: dict) -> None:
-        """把配置填进控件。"""
         self.cfg = cfg
         hk = cfg["hotkey"]
         self.vars["hotkey_keys"].set("+".join(hk.get("keys", ["ctrl", "win"])))
@@ -510,6 +595,11 @@ class SettingsWindow:
         self.vars["asr_url"].set(asr.get("url", ""))
         self.vars["asr_language"].set(self._pick(LANGUAGES, asr.get("language"), "自动检测"))
         self.vars["asr_context"].set(asr.get("context", "") or "")
+        self.vars["asr_max_utterance"].set(str(asr.get("max_utterance_sec") or 30))
+
+        audio = cfg.get("audio") or {}
+        self.vars["audio_device"].set(
+            self._pick_device(audio.get("device"), audio.get("device_name", "")))
 
         llm = cfg["llm"]
         self.vars["llm_enabled"].set(bool(llm.get("enabled", True)))
@@ -530,6 +620,8 @@ class SettingsWindow:
         self.vars["llm_api_key"].set(llm.get("api_key", "") or "")
         self.vars["llm_model"].set(llm.get("model", "") or "")
         self.vars["llm_timeout"].set(str(llm.get("timeout", DEFAULT_LLM_TIMEOUT)))
+        self.vars["llm_max_tokens"].set(
+            str(llm.get("max_tokens") or DEFAULT_LLM_MAX_TOKENS))
 
         tr = cfg["translate"]
         self.vars["translate_enabled"].set(bool(tr.get("enabled", False)))
@@ -571,6 +663,27 @@ class SettingsWindow:
         cfg["asr"]["url"] = self.vars["asr_url"].get().strip()
         cfg["asr"]["language"] = LANGUAGES.get(self.vars["asr_language"].get())
         cfg["asr"]["context"] = self.vars["asr_context"].get().strip()
+        cfg["asr"]["max_utterance_sec"] = self._num(
+            self.vars["asr_max_utterance"].get(), 30, int)
+
+        # 麦克风：**同时**存序号与名称。
+        # 序号会漂移（插拔声卡/换耳机），名称不会 —— 启动时按名称重解析。
+        picked = self.vars["audio_device"].get()
+        cfg.setdefault("audio", {})
+        if not picked or picked == AUDIO_DEVICE_DEFAULT:
+            cfg["audio"]["device"] = None
+            cfg["audio"]["device_name"] = ""
+        else:
+            idx = None
+            try:
+                for i, dev_name in list_input_devices():
+                    if dev_name == picked:
+                        idx = i
+                        break
+            except Exception:  # noqa: BLE001
+                idx = None
+            cfg["audio"]["device"] = idx
+            cfg["audio"]["device_name"] = picked
 
         cfg["llm"]["enabled"] = bool(self.vars["llm_enabled"].get())
         cfg["llm"]["mode"] = self.vars["llm_mode"].get() or DEFAULT_MODE_ID
@@ -581,6 +694,8 @@ class SettingsWindow:
         cfg["llm"]["api_key"] = self.vars["llm_api_key"].get().strip()
         cfg["llm"]["model"] = self.vars["llm_model"].get().strip()
         cfg["llm"]["timeout"] = self._num(self.vars["llm_timeout"].get(), DEFAULT_LLM_TIMEOUT)
+        cfg["llm"]["max_tokens"] = self._num(
+            self.vars["llm_max_tokens"].get(), DEFAULT_LLM_MAX_TOKENS, int)
         cfg["llm"]["prompt"] = self._prompt_override.strip()
 
         cfg["translate"]["enabled"] = bool(self.vars["translate_enabled"].get())
@@ -684,7 +799,8 @@ class SettingsWindow:
         self.cfg = cfg
         if self.on_save:
             self.on_save(cfg)
-        messagebox.showinfo("已保存", "设置已保存到：\n%s\n\n重启 EtherealFlow 后生效。" % path)
+        messagebox.showinfo("已保存", "设置已保存到：\n%s\n\n%s"
+                            % (path, EFFECTS_HELP))
 
     def run(self) -> None:
         self.root.mainloop()

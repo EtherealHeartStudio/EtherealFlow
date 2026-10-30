@@ -19,7 +19,6 @@ P3 会在这里接上 LLM 修正与文本注入；P4 接上流式翻译。
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 import threading
@@ -29,10 +28,12 @@ from typing import Any, Optional
 
 from . import win32 as w32
 from .asr import AsrClient
-from .audio import MicCapture, list_input_devices, read_wav_pcm16k
+from .audio import (MicCapture, list_input_devices, read_wav_pcm16k,
+                   resolve_input_device)
 from .config import (DEFAULT_CONFIG, default_config_dir, default_config_path,  # noqa: F401
-                     load_config)
+                     deep_merge, load_config)
 from .hotkey import create_hotkey
+from .hotreload import ConfigWatcher, diff_sections
 from .inject import default_injector
 from .llm import default_client
 from .overlay import Overlay
@@ -63,8 +64,9 @@ def emit(text: str) -> None:
 
 
 class App:
-    def __init__(self, cfg: dict[str, Any]) -> None:
+    def __init__(self, cfg: dict[str, Any], config_path: Optional[str | Path] = None) -> None:
         self.cfg = cfg
+        self.config_path = Path(config_path) if config_path else None
         self.translate_enabled = bool(cfg.get("translate", {}).get("enabled", False))
         self.overlay = Overlay(width=cfg["overlay"]["width"],
                                opacity=cfg["overlay"]["opacity"],
@@ -95,6 +97,88 @@ class App:
         self.llm_enabled = bool(cfg["llm"].get("enabled", True))
         self.inject_enabled = str(cfg["inject"].get("mode", "clipboard")).lower() != "none"
         self.hotwords = list(cfg.get("hotwords") or [])
+        # BF-13.1：盯着配置文件，改了自动热更新（不用重启）
+        self._watcher: Optional[ConfigWatcher] = None
+        self._reload_lock = threading.Lock()
+
+    # -- 配置热更新（BF-13.1） --------------------------------------------- #
+
+    def _apply_hot_reload(self, raw: dict) -> None:
+        """配置文件变了 —— 把**能热更新**的部分换掉。
+
+        ⚠️ 用 ``deep_merge(DEFAULT_CONFIG, raw)`` 而不是直接用 raw：
+        配置文件里只写「用户改过的键」（见 ``config.save_config``），
+        直接用 raw 的话，缺省的那些键就**全部消失**了。
+        """
+        with self._reload_lock:
+            old_cfg = self.cfg
+            # ``deep_merge`` 返回的是**深拷贝**（BF-5）——
+            # 结果与 DEFAULT_CONFIG 不共享任何嵌套对象，
+            # 后面改 cfg["llm"]["xxx"] 不会污染全局默认值。
+            new_cfg = deep_merge(DEFAULT_CONFIG, raw)
+            changed = diff_sections(old_cfg, new_cfg)
+            if not changed:
+                return
+            self.cfg = new_cfg
+
+            # --- LLM：重建客户端 ---
+            # 「保留一次连接预热」：新旧客户端**并存**，新的建好再换 ——
+            # 正在飞行中的请求继续用旧客户端跑完，不会被打断。
+            if "llm" in changed:
+                old_llm = self.llm
+                self.llm = default_client(new_cfg.get("llm"))
+                self.llm_enabled = bool(new_cfg["llm"].get("enabled", True))
+                self.log("配置已更新：LLM 客户端已重建"
+                         "（模型=%s、超时=%.0fs、max_tokens=%d）"
+                         % (self.llm.model or "(默认)", self.llm.timeout,
+                            self.llm.max_tokens))
+                del old_llm
+
+            # --- 注入器：重建 ---
+            if "inject" in changed:
+                self.injector = default_injector(new_cfg.get("inject"))
+                self.inject_enabled = (str(new_cfg["inject"].get("mode", "clipboard"))
+                                       .lower() != "none")
+                self.log("配置已更新：注入方式=%s"
+                         % new_cfg["inject"].get("mode", "clipboard"))
+
+            # --- 热词：下一次会话带上 ---
+            if "hotwords" in changed:
+                self.hotwords = list(new_cfg.get("hotwords") or [])
+                self.log("配置已更新：热词 %d 条" % len(self.hotwords))
+
+            # --- 识别服务：地址变了要重连 ---
+            if "asr" in changed:
+                new_url = new_cfg["asr"].get("url", "")
+                old_url = old_cfg.get("asr", {}).get("url", "")
+                if new_url and new_url != old_url:
+                    self.log("配置已更新：识别服务地址变了（%s → %s），重连中"
+                             % (old_url, new_url))
+                    self.asr.url = new_url
+                    # AsrClient 自己会重连（_run 循环里 urlopen 失败会重试）
+                else:
+                    self.log("配置已更新：识别参数（语言/上下文/分段时长）已生效")
+
+            # --- 音频：下一次开麦时用 ---
+            if "audio" in changed:
+                self.log("配置已更新：麦克风设置将在下一次录音时生效")
+
+            # --- 翻译：下一次说话时用 ---
+            if "translate" in changed:
+                self.translate_enabled = bool(new_cfg.get("translate", {})
+                                              .get("enabled", False))
+                self.log("配置已更新：翻译参数将在下一次说话时生效")
+
+            cold = sorted(changed & {"hotkey", "overlay"})
+            if cold:
+                self.log("⚠ %s 的改动需要**重启客户端**才生效" % "、".join(cold))
+
+    def _start_config_watcher(self) -> None:
+        if self.config_path is None:
+            return
+        self._watcher = ConfigWatcher(self.config_path, self._apply_hot_reload)
+        self._watcher.start()
+        self.log("配置监视中：%s（改了会自动生效，不用重启）" % self.config_path)
 
     def _begin_asr_session(self) -> None:
         """开识别会话：context = 热词表 + 识别上下文。
@@ -250,13 +334,57 @@ class App:
             self.done.set()
             return
         res = self.injector.inject(text)
+        # ⚠️ 注入日志**要等剪贴板还原完成后再打**。
+        # 还原是延迟执行的（默认 500 ms 后），而「还原成功/失败」是这个结果里
+        # 最该让用户看到的信息 —— 之前日志打得早，日志里永远没有
+        # 「剪贴板已还原」这一句，还原失败更是完全静默。
         self.log("注入（%s，%s）：%s" % (source, res.method, res.describe()))
-        for warn in res.warnings:
+        for warn in list(res.warnings):
             self.log("  注入告警：%s" % warn)
-        self.done.set()
+        if not self.injector.restore_clipboard:
+            self.done.set()
+            return
+
+        def _log_after_restore() -> None:
+            deadline = time.time() + 3.0
+            while time.time() < deadline and not res.restore_done:
+                time.sleep(0.05)
+            self.log("注入完成（%s）：%s" % (source, res.describe()))
+            for warn in res.warnings:
+                self.log("  注入告警：%s" % warn)
+            self.done.set()
+
+        threading.Thread(target=_log_after_restore, daemon=True).start()
+
+    def _on_audio_block(self, pcm: bytes) -> None:
+        """麦克风来了一块音频。
+
+        除了喂给识别引擎，还负责**更新音量电平**（FR-3.5）——
+        ``MicCapture.peak`` 里存着最近一块的峰值，之前算了没人读。
+        """
+        self.asr.feed(pcm)
+        peak = getattr(self.mic, "peak", 0.0) if self.mic is not None else 0.0
+        self.overlay.set_volume(peak)
 
     def _on_error(self, msg: str) -> None:
         self.log("ERROR: %s" % msg)
+        # FR-3.6：出错要让用户**看得见**。
+        # 只写日志的话，用户看到的是「悬浮窗一直空着」，完全不知道出了事。
+        # 但不是所有错误都值得弹窗 —— 「音频积压」「丢弃了几个块」这类
+        # 是可恢复的内部状态，用户没法处理，刷屏反而烦人。
+        if self._is_actionable_error(msg):
+            # 录音过程中出错 → **不要**自动隐藏悬浮窗（它正显示着流式文字）
+            self.overlay.show_error(msg, auto_hide=not self.session_active)
+        else:
+            # 恢复性错误：把状态栏改成 error，但不覆盖正在流式显示的文字
+            self.overlay.post("state", "error")
+
+    #: 只有这些错误才值得**覆盖正文**显示（其余走状态栏）。
+    _ACTIONABLE_ERROR_HINTS = ("连接失败", "未就绪", "鉴权", "401", "403",
+                               "超时", "拒绝", "打开失败", "发送失败")
+
+    def _is_actionable_error(self, msg: str) -> bool:
+        return any(hint in msg for hint in self._ACTIONABLE_ERROR_HINTS)
 
     def _on_status(self, status: str) -> None:
         self.log("ASR 状态: %s" % status)
@@ -282,10 +410,15 @@ class App:
             self.translator.start()
         if not use_mic:
             return
-        dev = self.cfg["audio"].get("device")
+        # 麦克风设备：**按名称优先**解析，序号只作兜底。
+        # 设备序号会漂移（插拔 USB 声卡 / 换蓝牙耳机 / 系统默认设备变化），
+        # 只存序号会导致「昨天还好好的麦今天没了」—— 详见 audio.resolve_input_device。
+        audio_cfg = self.cfg.get("audio") or {}
+        dev = resolve_input_device(audio_cfg.get("device"),
+                                   audio_cfg.get("device_name", ""))
         self.mic = MicCapture(device=dev, chunk_ms=self.cfg["audio"]["chunk_ms"],
                               gain=self.cfg["audio"].get("gain", 1.0),
-                              on_block=self.asr.feed,
+                              on_block=self._on_audio_block,
                               on_error=self._on_error)
         try:
             self.mic.start()
@@ -356,6 +489,7 @@ class App:
 
     def run(self, replay: Optional[str] = None, exit_after_final: bool = False) -> int:
         self.asr.start()
+        self._start_config_watcher()
         if replay:
             threading.Thread(target=self._replay, args=(replay, exit_after_final),
                              daemon=True).start()
@@ -394,6 +528,9 @@ class App:
     def _shutdown(self) -> None:
         if self.hotkey is not None:
             self.hotkey.stop()
+        if self._watcher is not None:
+            self._watcher.stop()
+            self._watcher = None
         self._stop_mic()
         self.asr.close()
 
@@ -430,10 +567,27 @@ def main() -> int:
         return 0
 
     cfg = load_config(args.config or None)
+    cfg_path = Path(args.config) if args.config else default_config_path()
     if args.hotkey_backend:
         cfg["hotkey"]["backend"] = args.hotkey_backend
     if args.device is not None:
-        cfg["audio"]["device"] = int(args.device) if args.device.isdigit() else args.device
+        # 数字 = 序号；否则当作设备名。
+        # 两种都同时写入 device_name，运行时按名重解析（序号会漂移）。
+        if args.device.isdigit():
+            cfg["audio"]["device"] = int(args.device)
+            try:
+                devs = dict(list_input_devices())
+                cfg["audio"]["device_name"] = devs.get(int(args.device), "")
+            except Exception:  # noqa: BLE001
+                cfg["audio"]["device_name"] = ""
+        else:
+            cfg["audio"]["device_name"] = args.device
+            try:
+                devs = dict(list_input_devices())
+                cfg["audio"]["device"] = next(
+                    (i for i, n in devs.items() if n == args.device), None)
+            except Exception:  # noqa: BLE001
+                cfg["audio"]["device"] = None
     if args.no_llm:
         cfg["llm"]["enabled"] = False
     if args.inject_mode:
@@ -445,7 +599,7 @@ def main() -> int:
     if args.target_language:
         cfg["translate"]["target_language"] = args.target_language
 
-    app = App(cfg)
+    app = App(cfg, config_path=cfg_path)
     try:
         return app.run(replay=args.replay or None, exit_after_final=args.exit_after_final)
     except KeyboardInterrupt:
