@@ -36,6 +36,15 @@ STATE_LABEL = {
     "thinking": "✨ 修正中…",
     "translating": "🌐 翻译中…",
     "done": "✅ 完成",
+    # FR-3.6：出错时必须有**看得见的状态**，不能只往日志里写一行。
+    # 以前断连/鉴权失败只出现在日志里，用户看到的是「悬浮窗一直空着」，
+    # 完全不知道出了什么事。
+    "error": "⚠️ 出错了",
+}
+
+#: 状态对应的文字颜色（error 用红色，一眼能看出来）
+STATE_COLOR = {
+    "error": "#ff8080",
 }
 
 
@@ -98,6 +107,19 @@ class Overlay:
                                    anchor="w", wraplength=wrap,
                                    font=("Microsoft YaHei UI", self.font_size))
         self.text_label.pack(fill="x", padx=pad, pady=(8, 10))
+
+        # FR-3.5：音量电平条。
+        # 数据来源是 MicCapture.peak（最近一块音频的峰值），由 app.py 喂进来。
+        # 用 Canvas 画而不是拼字符串 —— 电平条要**连续变化**，字符串拼起来会抖。
+        self.level = tk.Canvas(self.frame, height=4, bg=SEP,
+                               highlightthickness=0, bd=0)
+        self.level.pack(fill="x", padx=pad, pady=(0, 8))
+        #: 当前显示的电平（0~1，已平滑）
+        self._level = 0.0
+        #: 最近一次收到的目标电平（0~1，来自 MicCapture.peak）
+        self._level_target = 0.0
+        #: 上一次重画的时间（用于**按时间**算衰减）
+        self._level_at = time.monotonic()
 
         # 译文区（P4 才真正用上，先把位置留好）
         self.sep = tk.Frame(self.frame, bg=SEP, height=1)
@@ -169,6 +191,15 @@ class Overlay:
     def top_hwnd(self) -> Optional[int]:
         return getattr(self, "_top_hwnd", None)
 
+    def snapshot(self) -> tuple[str, str]:
+        """当前（状态, 文本）—— 供其它线程判断要不要覆盖显示。
+
+        读起来不是严格线程安全的（``_text`` 可能在读的同时被换掉），
+        但 Python 的字符串赋值是原子的，拿到的一定是某个完整的状态，
+        不会拿到「半个字符串」—— 这里用它做个粗粒度判断足够了。
+        """
+        return self._state, self._text
+
     # -- 对外接口（线程安全：任意线程可调） -------------------------------- #
 
     def post(self, kind: str, value: Any = None) -> None:
@@ -185,6 +216,28 @@ class Overlay:
 
     def set_state(self, state: str) -> None:
         self.post("state", state)
+
+    def set_volume(self, peak: float) -> None:
+        """更新音量电平（0.0 ~ 1.0）。
+
+        FR-3.5。``peak`` 是最近一块音频的峰值（``MicCapture.peak``）。
+        线程安全：走 ``post()`` 队列，由主线程画。
+        """
+        try:
+            value = max(0.0, min(1.0, float(peak)))
+        except (TypeError, ValueError):
+            value = 0.0
+        self.post("volume", value)
+
+    def show_error(self, message: str, auto_hide: bool = True) -> None:
+        """显示一条错误（FR-3.6）。
+
+        以前出错只写日志，用户只看到「悬浮窗空着」—— 现在**看得见**。
+
+        ``auto_hide=False`` 用于**录音过程中**出错：那时要让悬浮窗继续留着
+        （它正显示着流式识别文字），不然用户会以为程序挂了。
+        """
+        self.post("error", (message or "未知错误", bool(auto_hide)))
 
     def hide(self) -> None:
         self.post("hide", None)
@@ -296,6 +349,9 @@ class Overlay:
             self._state = value or "listening"
             self._text = ""
             self._translation = ""
+            # 新的一次录音 → 电平归零（上一段的余量不该带到这一段）
+            self._level = 0.0
+            self._level_target = 0.0
             self._render()
             self._place()
             self.visible = True
@@ -320,6 +376,19 @@ class Overlay:
         elif kind == "state":
             self._state = value
             self._render()
+        elif kind == "volume":
+            self._level_target = value
+            self._draw_level()
+        elif kind == "error":
+            # FR-3.6：错误既进状态栏，也进正文区 —— 状态栏只有几个字，
+            # 具体原因（哪个地址、什么错）得让人看得见。
+            message, auto_hide = value if isinstance(value, tuple) else (value, True)
+            self._state = "error"
+            self._text = message
+            self._render()
+            self._reheight()
+            if auto_hide:
+                self.hide_in(4.0)
         elif kind == "hide":
             self.root.withdraw()
             self.visible = False
@@ -341,17 +410,81 @@ class Overlay:
                     pass
 
     def _render(self) -> None:
-        self.status.configure(text=STATE_LABEL.get(self._state, ""))
+        self.status.configure(text=STATE_LABEL.get(self._state, ""),
+                              fg=STATE_COLOR.get(self._state, ACCENT))
         placeholder = "…" if self._state in ("listening", "thinking", "translating") else ""
-        self.text_label.configure(text=self._text or placeholder)
+        self.text_label.configure(text=self._text or placeholder,
+                                  fg="#ff9c9c" if self._state == "error" else FG)
         if self.translate:
             self.trans_label.configure(text=self._translation)
+        # 只在录音态显示电平条：其它状态留着一条灰杠没意义
+        #
+        # ⚠️ ``pack_forget()`` 之后用 ``pack_configure()`` 就能**放回来**
+        # （实测：pack_configure 会重新纳管这个控件，winfo_manager() 变回 "pack"），
+        # 所以不用 pack()/pack_configure() 分支。
+        if self._state == "listening":
+            self.level.pack_configure(fill="x", padx=16, pady=(0, 8))
+        else:
+            self.level.pack_forget()
+        self._draw_level()
+
+    def _draw_level(self) -> None:
+        """画电平条。
+
+        电平是**按时间**平滑的，不是按帧：
+        ``_level`` 向 ``_level_target`` 靠拢，**上升立刻跟上、下降慢慢泄**。
+        衰减系数按**实际经过的时间**算（而不是「每帧乘 0.6」）。
+
+        ⚠️ 踩过的坑：原来写成「每帧乘 0.6」，而重画是**每 30 ms 一次**
+        —— 等于每秒衰减 20 次，0.5 秒就没了。麦克风是每 160 ms 才来一块，
+        两块之间电平早泄光了，电平条**永远是空的**（实测：条宽恒为 0）。
+        所以必须按时间算：``ratio = 1 - exp(-dt / tau)``。
+        """
+        if self._state != "listening":
+            return
+        try:
+            if not self.level.winfo_exists():
+                return
+            width = int(self.level.winfo_width())
+        except tk.TclError:
+            return
+
+        now = time.monotonic()
+        dt = max(0.0, now - self._level_at)
+        self._level_at = now
+
+        target = self._level_target
+        if target >= self._level:
+            self._level = target              # 上升：立刻跟上
+        else:
+            # 下降：**线性**释放，在 RELEASE 秒内正好落到 0。
+            #
+            # 为什么不用指数衰减（``level *= exp(-dt/tau)``）：指数永远到不了 0，
+            # 会留一条**永远不消失的尾巴**（实测：静音 1.5 秒后仍有 11% 宽的条
+            # 挂在那儿，看着像还在收音）。线性释放正好落在 0。
+            self._level -= dt / 0.35
+            if self._level < 0.0:
+                self._level = 0.0
+
+        self.level.delete("bar")
+        if width <= 1:
+            return          # 还没映射，宽度未知，等下一次重画
+        # 峰值是 0~1 的浮点；开方让它在小音量时也有可见变化（人耳对小声更敏感）
+        ratio = min(1.0, max(0.0, self._level)) ** 0.5
+        bar_w = int(width * ratio)
+        if bar_w > 0:
+            color = ACCENT if ratio < 0.85 else "#ffcf6b"
+            self.level.create_rectangle(0, 0, bar_w, 4, fill=color, outline="",
+                                        tags="bar")
 
     def _tick_timer(self) -> None:
         if self._state != "listening" or self._started_at is None:
             return
         el = int(time.monotonic() - self._started_at)
         self.timer.configure(text="%02d:%02d" % (el // 60, el % 60))
+        # 电平条每帧重画：麦克风的 peak 只在收到新块时更新（每 160 ms 一次），
+        # 这里重画是为了让电平**平滑泄下去**，而不是一格一格地跳。
+        self._draw_level()
 
     def _target_y(self, height: int) -> int:
         _left, top, _right, bottom = w32.cursor_monitor_work_area()

@@ -30,7 +30,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from client.llm import (LlmClient, LlmBadOutputError, clean_model_text,  # noqa: E402
-                        validate_output)
+                        check_base_url, validate_output)
 
 ORIGINAL = "嗯那个，我们今天就是测试一下这个语音输入法"
 CORRECTED = "我们今天测试一下这个语音输入法。"
@@ -136,6 +136,37 @@ def start_server() -> tuple[ThreadingHTTPServer, str]:
     srv.daemon_threads = True
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv, "http://127.0.0.1:%d/v1" % srv.server_address[1]
+
+
+def evaluate_case(out, want_changed: bool, want_deg: bool, want_notify: bool,
+                  want_code: str) -> tuple[bool, str]:
+    """把一次端到端调用的结果和期望**逐项**对比，返回 ``(是否通过, 说明)``。
+
+    ⚠️ 这里必须逐项判、不能写成一条大 ``and`` 再 ``or want_changed`` ——
+    Python 里 ``and`` 优先级高于 ``or``，那么写出来的等价于
+    ``(... and ...) or want_changed``：凡是 ``want_changed=True`` 的行**恒为真**，
+    成功路径永远不可能失败 —— 整套断言等于没写（BF-8）。
+
+    期望的最终文本：改了就是 ``CORRECTED``，没改/降级就是 ``ORIGINAL``。
+    """
+    problems: list[str] = []
+    if out.changed != want_changed:
+        problems.append("changed 应为 %s，实际 %s" % (want_changed, out.changed))
+    if out.degraded != want_deg:
+        problems.append("degraded 应为 %s，实际 %s" % (want_deg, out.degraded))
+    if out.notify != want_notify:
+        problems.append("notify 应为 %s，实际 %s" % (want_notify, out.notify))
+    if out.code != want_code:
+        problems.append("code 应为 %r，实际 %r" % (want_code, out.code))
+    want_text = CORRECTED if want_changed else ORIGINAL
+    if out.text != want_text:
+        problems.append("text 应为 %r，实际 %r" % (want_text, out.text))
+    if not out.text.strip():
+        problems.append("text 是空串（绝不能返回空串）")
+    if not problems:
+        return True, "changed=%s degraded=%s notify=%s code=%s text=%r" % (
+            out.changed, out.degraded, out.notify, out.code, out.text[:40])
+    return False, "；".join(problems)
 
 
 def main() -> int:
@@ -296,16 +327,11 @@ def main() -> int:
     for mode, want_changed, want_deg, want_notify, want_code, label in cases:
         MODE["value"] = mode
         out = client.correct(ORIGINAL, hotwords=["EtherealFlow", "Confucius4", "R2T2"])
-        ok = (out.changed == want_changed and out.degraded == want_deg
-              and out.notify == want_notify
-              and (want_code == "" or out.code == want_code)
-              and out.text.strip() != "" or want_changed)
-        # 降级时注入的必须是**原文**，绝不能是空串（否则用户白说一句）
-        if want_deg and want_code != "" and mode != "same":
-            ok = ok and out.text == ORIGINAL
-        check("端到端：%s" % label, bool(ok),
-              "changed=%s degraded=%s notify=%s code=%s text=%r"
-              % (out.changed, out.degraded, out.notify, out.code, out.text[:40]))
+        # 断言统一走 evaluate_case —— 那里逐项比对，不会出现
+        # "and 优先级高于 or 导致 want_changed=True 的行恒真"的坑（BF-8）。
+        ok, detail = evaluate_case(out, want_changed, want_deg,
+                                   want_notify, want_code)
+        check("端到端：%s" % label, ok, detail)
 
     # 连不上：先占一个端口拿到"确定没人监听"的号，再放掉
     import socket
@@ -332,6 +358,142 @@ def main() -> int:
     out = client.translate(ORIGINAL, "English")
     check("翻译：正常返回并被采用", out.changed and out.text == CORRECTED,
           "text=%r" % out.text)
+
+    # ---------- BF-8 阳性对照：断言必须**真的能失败** ---------- #
+    # 这一段是**测试自己的自检**，不是测产品。
+    #
+    # 背景：原来的断言写成
+    #     ok = (A and B and C and D and E) or want_changed
+    # Python 里 ``and`` 优先级高于 ``or``，它等价于 ``(... and ...) or want_changed``
+    # —— 于是凡是 ``want_changed=True`` 的行**恒为真**，成功路径永远不可能失败。
+    # 这样的断言等于没写：实现坏掉了它也不会报。
+    #
+    # 对照做法：故意让实现返回**坏输出**，然后断言对应的用例**必须失败**。
+    # 这条对照要**能重复跑**，所以用 mock 替换掉某个函数，而不是手工改文件。
+    MODE["value"] = "markdown"
+    good = client.correct(ORIGINAL, hotwords=["EtherealFlow", "Confucius4", "R2T2"])
+    ok_good, detail_good = evaluate_case(good, True, False, False, "")
+    check("阳性对照前提：正常服务下『带 Markdown 壳也能采用』判通过",
+          ok_good, detail_good)
+
+    # 现在把校验函数换成一个**坏的**：它不剥 Markdown 壳，原样返回。
+    # 于是实现的正确性被破坏 —— 对应用例**必须**被判失败。
+    import unittest.mock as _mock
+    with _mock.patch("client.llm.validate_output",
+                     lambda original, output, hotwords=None: output):
+        MODE["value"] = "markdown"
+        broken = client.correct(ORIGINAL, hotwords=["EtherealFlow", "Confucius4", "R2T2"])
+    ok_broken, detail_broken = evaluate_case(broken, True, False, False, "")
+    check("阳性对照：实现被改坏时，对应用例**必须判失败**"
+          "（否则说明断言恒真，BF-8 没修好）",
+          not ok_broken,
+          "改坏后 evaluate_case 判定=%s（应为 False）。细节：%s"
+          % (ok_broken, detail_broken))
+
+    # 反向对照：把实现改坏到"输出内容完全不对"时，也必须判失败。
+    with _mock.patch("client.llm.validate_output",
+                     lambda original, output, hotwords=None: "（坏的实现）"):
+        MODE["value"] = "ok"
+        broken2 = client.correct(ORIGINAL, hotwords=["EtherealFlow", "Confucius4", "R2T2"])
+    ok_broken2, detail_broken2 = evaluate_case(broken2, True, False, False, "")
+    check("阳性对照：实现返回坏内容时，对应用例**必须判失败**",
+          not ok_broken2,
+          "改坏后 evaluate_case 判定=%s（应为 False）。细节：%s"
+          % (ok_broken2, detail_broken2))
+
+    # 证明"老写法"确实是恒真的：把 BF-8 里那个原始表达式原样搬过来，
+    # 喂它上面那个**已经坏了**的结果 —— 它照样判"通过"。
+    # 这正是缺陷报告里说的「4/15 行成功路径不可能失败」。
+    want_changed = True
+    want_deg = False
+    want_notify = False
+    want_code = ""
+    old_style = (broken.changed == want_changed and broken.degraded == want_deg
+                 and broken.notify == want_notify
+                 and (want_code == "" or broken.code == want_code)
+                 and broken.text.strip() != "" or want_changed)
+    check("阳性对照：老写法（and/or 优先级错误）对坏结果仍判通过 —— "
+          "这正是 BF-8 的病根",
+          old_style is True,
+          "老写法判定=%s（这里必须是 True，才说明病根复现成功）" % old_style)
+
+    # 另一条对照：让**假服务**返回坏输出（长度失控），却按"正常修正"去断言，
+    # 对应用例必须判失败。这条不需要 mock，直接改服务端的输出开关。
+    MODE["value"] = "runaway"
+    runaway = client.correct(ORIGINAL, hotwords=["EtherealFlow", "Confucius4", "R2T2"])
+    ok_runaway, detail_runaway = evaluate_case(runaway, True, False, False, "")
+    check("阳性对照：服务端返回坏输出时，按『正常修正』断言**必须判失败**",
+          not ok_runaway,
+          "判定=%s（应为 False）。细节：%s" % (ok_runaway, detail_runaway))
+    MODE["value"] = "ok"
+
+    # ---------- BF-7：畸形地址不许杀掉修正线程 ---------- #
+    # `http://host:abc/v1` 这种地址在 http.client 里抛的是 InvalidURL ——
+    # 它**既不是** URLError **也不是** OSError。以前它会一路逃出 correct()，
+    # 把 client/app.py 里发起修正的线程打死：界面永远停在"修正中"，
+    # 用户的话白说了（不注入任何东西，done 状态永不设置）。
+    bad_urls = [
+        ("http://host:abc/v1", "端口不是数字"),
+        ("http://host:99999/v1", "端口超出范围"),
+        ("http://host:not a port/v1", "地址里有空格"),
+        ("", "地址是空的"),
+        ("ftp://host/v1", "协议不支持"),
+    ]
+    for raw, why in bad_urls:
+        try:
+            out = LlmClient(base_url=raw, api_key="k", model="m",
+                            timeout=1.0).correct(ORIGINAL)
+        except Exception as exc:  # noqa: BLE001
+            check("畸形地址（%s）不许抛异常" % why, False,
+                  "抛出了 %s: %s" % (type(exc).__name__, exc))
+            continue
+        check("畸形地址（%s）→ 归类为配置错误并提示用户" % why,
+              out.degraded and out.notify and out.code == "config"
+              and out.text == ORIGINAL,
+              "degraded=%s notify=%s code=%s text=%r error=%r"
+              % (out.degraded, out.notify, out.code, out.text[:30], out.error[:80]))
+
+    # 提示必须**说清楚哪个地址不对、怎么改**，而不是"连接失败"
+    out = LlmClient(base_url="http://host:abc/v1", api_key="k").correct(ORIGINAL)
+    check("配置错误提示里要指出是哪个地址、端口怎么写",
+          "host:abc" in out.error and "端口" in out.error,
+          "error=%r" % out.error[:120])
+
+    # 翻译路径同样不许抛异常
+    try:
+        out = LlmClient(base_url="http://host:abc/v1", api_key="k").translate(ORIGINAL, "English")
+        check("翻译遇到畸形地址 → 降级为原文并提示用户",
+              out.degraded and out.notify and out.code == "config"
+              and out.text == ORIGINAL,
+              "degraded=%s notify=%s code=%s text=%r"
+              % (out.degraded, out.notify, out.code, out.text[:30]))
+    except Exception as exc:  # noqa: BLE001
+        check("翻译遇到畸形地址 → 降级为原文并提示用户", False,
+              "抛出了 %s: %s" % (type(exc).__name__, exc))
+
+    # 地址检查函数本身
+    check("地址检查：正常地址通过",
+          check_base_url("http://127.0.0.1:8317/v1") is None,
+          repr(check_base_url("http://127.0.0.1:8317/v1")))
+    check("地址检查：端口不是数字 → 给出人话提示",
+          "端口" in (check_base_url("http://host:abc/v1") or ""),
+          repr(check_base_url("http://host:abc/v1")))
+    check("地址检查：地址为空 → 给出人话提示",
+          "空" in (check_base_url("") or ""),
+          repr(check_base_url("")))
+    check("地址检查：协议不对 → 给出人话提示",
+          "http" in (check_base_url("ftp://host/v1") or ""),
+          repr(check_base_url("ftp://host/v1")))
+
+    # complete() 本身也不能抛异常 —— 它是底层，改动它最容易漏
+    try:
+        comp = LlmClient(base_url="http://host:abc/v1", api_key="k").complete("hi")
+        check("complete() 遇畸形地址 → 返回带错误的 Completion，不抛异常",
+              bool(comp.error) and comp.code == "config" and comp.notify,
+              "error=%r code=%r notify=%r" % (comp.error[:60], comp.code, comp.notify))
+    except Exception as exc:  # noqa: BLE001
+        check("complete() 遇畸形地址 → 返回带错误的 Completion，不抛异常", False,
+              "抛出了 %s: %s" % (type(exc).__name__, exc))
 
     # ---------- 本地模型路径 ---------- #
     # 本地部署（Ollama / LM Studio / llama.cpp / vLLM）通常**不校验** API Key。

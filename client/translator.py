@@ -17,6 +17,14 @@ opentypeless 把翻译写成 system prompt 里一句指令，openwhispr 是"整�
 * 万一后端回退了已经落定的文字（R2T2 号称 append-only，但 UI 必须容错），
   就把受影响的尾部段丢掉重译，而不是硬拼。
 
+**翻译方向是会话级的（BF-10）**：中英混说时，一句话不该被劈成两种语言。
+所以方向只在**第一次翻译时**判定一次，之后整个会话锁死不动
+（``_resolve_target()`` / ``session_target``）。
+
+**翻译失败绝不静默吞句（BF-11）**：某段失败会**重试一次**；仍失败就**回退成原文**
+并入译文（和成功的译文拼在一起），绝不整段丢掉 —— 丢掉等于用户的话凭空消失，
+而用户和日志都看不出来。
+
 线程模型：``update()`` 只把累积原文塞进队列立刻返回（**绝不阻塞识别线程**），
 真正的 LLM 调用在独立工作线程里做。
 """
@@ -47,6 +55,22 @@ def guess_target_language(text: str) -> str:
     return "Chinese"
 
 
+def resolve_target_language(configured: str, source: str) -> str:
+    """把「设置里的目标语言」解析成本会话**实际使用**的方向。
+
+    * 配置是显式语言（``English`` / ``Chinese`` / ``Japanese`` …）→ 直接用用户的值；
+    * 配置是 ``auto``（或空）→ 按 ``source`` 判一次。
+
+    注意：``auto`` 的判定**每个会话只做一次**（见
+    :meth:`IncrementalTranslator._resolve_target`）—— 逐段重判会把一句话
+    劈成两种语言（BF-10）。
+    """
+    cfg = (configured or "").strip()
+    if cfg and cfg.lower() != "auto":
+        return cfg
+    return guess_target_language(source)
+
+
 def last_sentence_end(text: str) -> int:
     """返回最后一个句末标点的下标（含）；没有则 -1。"""
     idx = -1
@@ -60,18 +84,26 @@ def last_sentence_end(text: str) -> int:
 class TranslationResult:
     text: str = ""                 # 最终应当**提交**的文本（译文优先）
     source: str = ""               # 对应原文
-    translated: bool = False       # 是否真的拿到了译文
-    degraded: bool = False         # 翻译全失败 → 回退原文
-    calls: int = 0
-    failed: int = 0
+    translated: bool = False       # 是否真的拿到了译文（至少一段是模型翻的）
+    degraded: bool = False         # 有段落翻译失败 → 已回退原文（不静默丢句）
+    calls: int = 0                 # LLM 调用次数（含重试）
+    failed: int = 0                # 翻译失败并回退原文的**段数**
     error: str = ""
+    target: str = ""               # 本会话锁定的翻译方向（BF-10）
     segments: list[tuple[str, str]] = field(default_factory=list)
 
     def describe(self) -> str:
-        return ("%s | 段数=%d LLM调用=%d 失败=%d%s"
+        text = ("%s | 段数=%d LLM调用=%d 失败=%d%s"
                 % ("已翻译" if self.translated else "降级为原文",
                    len(self.segments), self.calls, self.failed,
                    " | " + self.error if self.error else ""))
+        if self.failed:
+            # 需求 BF-11.3：日志里必须写明有几段没翻出来、回退成了原文。
+            # 不写的话，用户看到的是"少了一句话"，完全不知道发生了什么。
+            text += " | %d 段翻译失败，已回退原文" % self.failed
+        if self.target:
+            text += " | 方向=%s" % self.target
+        return text
 
 
 _SENTINEL = object()
@@ -84,7 +116,8 @@ class IncrementalTranslator:
                  on_update: Optional[Callable[[str], None]] = None,
                  on_error: Optional[Callable[[str], None]] = None) -> None:
         self.llm = llm
-        self.target_language = target_language or "auto"
+        cfg = (target_language or "").strip()
+        self.target_language = cfg or "auto"
         self.silence_sec = float(silence_sec)
         self.chunk_chars = int(chunk_chars)
         self.min_chars = int(min_chars)
@@ -103,6 +136,16 @@ class IncrementalTranslator:
         self.failed = 0
         self.last_error = ""
         self._lock = threading.Lock()
+
+        # --- BF-10：翻译方向是**会话级**的 --- #
+        # 整个会话只判一次方向，判完锁死，之后每一段都用同一个方向。
+        # 显式指定（设置里选了「英文」/「中文」…）时不需要文本就能定，
+        # 构造时直接锁定；"auto" 时必须等到**第一次翻译**（那时才有原文）
+        # 才判一次，之后永不重判。
+        self._locked_target: Optional[str] = None
+        if self.target_language.lower() != "auto":
+            self._locked_target = self.target_language
+        self.translated_segments = 0                 # 真正拿到模型译文的段数
 
     # -- 对外 -------------------------------------------------------------- #
 
@@ -130,14 +173,27 @@ class IncrementalTranslator:
         if self._worker is not None:
             self._worker.join(timeout=30)
             self._worker = None
-        src = self._full
+        # worker 已经 join 完，下面读到的都是最终状态。
         with self._lock:
-            trans, segs = self.translation, list(self._segments)
+            src = self._full
+            trans = self.translation
+            segs = list(self._segments)
+            target = self._locked_target or ""
+            failed = self.failed
+            translated_segments = self.translated_segments
+        # BF-11.1：只要有段落失败过，degraded 必须是 True。
+        # 旧写法是 `not trans.strip() or self.failed > 0 and not trans.strip()`，
+        # 运算符优先级让 `failed > 0` 整个失效 —— 有段失败也照样报"没降级"，
+        # 于是注入的文本悄悄少了一句话，用户和日志都看不出来。
+        degraded = bool(failed) or not trans.strip()
         res = TranslationResult(
-            text=trans, source=src, translated=bool(trans.strip()),
-            degraded=not trans.strip() or self.failed > 0 and not trans.strip(),
-            calls=self.calls, failed=self.failed, error=self.last_error, segments=segs)
-        if not trans.strip():
+            text=trans, source=src,
+            translated=translated_segments > 0,
+            degraded=degraded,
+            calls=self.calls, failed=failed, error=self.last_error,
+            segments=segs, target=target)
+        if not translated_segments:
+            # 一段译文都没拿到 → 提交原文（绝不提交空串）
             res.text = src
             res.degraded = True
         return res
@@ -219,28 +275,103 @@ class IncrementalTranslator:
         self._close_open()
 
     def _translate_and_append(self, source: str) -> None:
-        target = self.target_language
-        if target == "auto":
-            target = guess_target_language(source)
+        """翻译一段并追加到译文区。
+
+        失败处理（BF-11）：**先重试一次**；仍失败就把这一段**回退成原文**
+        并进译文 —— 绝不静默丢掉整句话。丢掉 = 用户的话凭空消失，
+        而用户和日志都看不出来（旧实现正是这么干的：段失败就不追加，
+        而 ``degraded`` 又因为运算符优先级失效，永远报"没降级"）。
+        """
+        target = self._resolve_target(source)
+        outcome, err = self._call_llm(source, target)
+        if outcome is None:
+            outcome, err = self._call_llm(source, target)      # 重试一次
+        if outcome is None:
+            # 重试后仍失败 → 该段回退为原文并入译文
+            self.failed += 1
+            self.last_error = err
+            self._append_segment(source, self._fallback_text(source, err),
+                                 translated=False)
+            self.on_error("翻译失败（已重试一次），本段回退原文：%s"
+                          % (err or "未知错误"))
+            return
+        self._append_segment(source, outcome.text, translated=True)
+
+    def _fallback_text(self, source: str, err: str) -> str:
+        """翻译失败后，这一段用什么文字顶上。
+
+        默认**回退原文**（BF-11.2）：整段丢掉的话，用户说的那句话就凭空
+        消失了 —— 而用户和日志都看不出来。回退成原文至少不丢信息。
+
+        单独拆成一个方法，是为了能在测试里**复现旧行为**（返回空串 = 丢弃）
+        来做阳性对照：断言必须能抓住这种坏实现，否则它什么都没断言。
+        """
+        return source
+
+    def _append_segment(self, source: str, text: str, translated: bool) -> None:
+        """把一段（原文, 译文）追加进译文区，并通知界面。"""
+        with self._lock:
+            self._segments.append((source, text))
+            if translated:
+                self.translated_segments += 1
+            # 必须用 smart_join：英文译文直接硬拼会变成 "…afternoon.Discuss…"
+            self.translation = smart_join(t for _s, t in self._segments)
+            out = self.translation
+        self.on_update(out)
+
+    # -- 翻译方向（BF-10） -------------------------------------------------- #
+
+    def _resolve_target(self, source: str) -> str:
+        """本会话的翻译方向；**第一次需要翻译时判定一次，之后锁死**。
+
+        BF-10：逐段各判一次方向会把一句话劈成两种语言（前半段译成英文、
+        后半段译成中文）。所以整个会话只判一次：
+
+        * 设置里显式指定（``English`` / ``Chinese`` …）→ 直接用用户的值
+          （构造时就锁好 —— 不需要文本）；
+        * ``auto`` → 在**第一次翻译发生时**判一次（那一刻才有文本可判，
+          构造时还没有任何文本），之后所有段落都用这个方向。
+
+        判定样本取**此刻累积到的原文**（``self._full``，至少包含当前这一段），
+        而不是只看当前段 —— 当前段可能只有半句话，样本太少会判歪。
+        """
+        with self._lock:
+            if self._locked_target is not None:
+                return self._locked_target
+            sample = self._full or source
+        target = resolve_target_language(self.target_language, sample)
+        with self._lock:
+            if self._locked_target is None:
+                self._locked_target = target
+            return self._locked_target
+
+    @property
+    def session_target(self) -> Optional[str]:
+        """本会话已锁定的翻译方向。
+
+        * 设置里显式指定 → 构造后立刻就是这个值；
+        * ``auto`` → 第一次翻译前是 ``None``，翻译一次后固定下来不再变。
+        """
+        with self._lock:
+            return self._locked_target
+
+    # -- 一次 LLM 调用 ------------------------------------------------------ #
+
+    def _call_llm(self, source: str, target: str):
+        """调一次 LLM。成功返回 ``(Outcome, "")``，失败返回 ``(None, 错误说明)``。
+
+        这里**不**报 ``on_error``：第一次失败可能马上被重试救回来，
+        报错了等于在日志里吓人。真正要报的是"重试后仍失败"，由调用方决定。
+        """
         self.calls += 1
         try:
             outcome = self.llm.translate(source, target)
         except Exception as exc:  # noqa: BLE001
-            self.failed += 1
-            self.last_error = str(exc)
-            self.on_error("翻译失败：%s" % exc)
-            return
+            return None, str(exc)
         if outcome.degraded or not outcome.text.strip():
-            self.failed += 1
-            self.last_error = outcome.error or "未取得译文"
-            self.on_error("翻译未成功（%s）：%s" % (outcome.code, outcome.error))
-            return
-        with self._lock:
-            self._segments.append((source, outcome.text))
-            # 必须用 smart_join：英文译文直接硬拼会变成 "…afternoon.Discuss…"
-            self.translation = smart_join(t for _s, t in self._segments)
-            text = self.translation
-        self.on_update(text)
+            return None, (outcome.error or "未取得译文（%s）"
+                          % (outcome.code or "unknown"))
+        return outcome, ""
 
 
 def default_translator(llm, cfg: Optional[dict] = None, **callbacks):

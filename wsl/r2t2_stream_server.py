@@ -72,7 +72,16 @@ REPO_DIR = os.environ.get("R2T2_REPO", f"{_WS}/runtime/r2t2/Confucius4-R2T2")
 HF_DIR = os.environ.get("R2T2_HF_DIR", f"{_WS}/runtime/r2t2-hf")
 GGUF_DIR = os.environ.get("GGUF_DIR", f"{_WS}/models/r2t2")
 
-HOST = os.environ.get("R2T2_STREAM_HOST", "0.0.0.0")
+# 监听地址。**默认只绑回环** —— 这个服务**没有任何鉴权**，
+# 绑到 0.0.0.0 等于把一个「谁都能连、连上就能录音」的接口暴露给整个局域网。
+#
+# 需要局域网访问时（比如另一台机器上的客户端）显式设环境变量：
+#     R2T2_STREAM_HOST=0.0.0.0
+#
+# ⚠️ WSL2 的 localhost 转发对回环绑定**照样有效** ——
+# Windows 侧连 127.0.0.1:18300 会被转发到 WSL 的 127.0.0.1:18300。
+# 所以绑回环不影响本机的正常使用（已实测）。
+HOST = os.environ.get("R2T2_STREAM_HOST", "127.0.0.1")
 PORT = int(os.environ.get("R2T2_STREAM_PORT", "18300"))
 
 CHUNK_MS = int(os.environ.get("R2T2_CHUNK_MS", "160"))
@@ -472,6 +481,12 @@ async def _amain(args: argparse.Namespace) -> int:
                         max_size=MAX_MESSAGE_BYTES) as ws_server:
         log.info("流式识别服务已就绪：ws://%s:%d（chunk=%d ms，ping %d/%d s）",
                  HOST, PORT, CHUNK_MS, PING_INTERVAL, PING_TIMEOUT)
+        if HOST not in ("127.0.0.1", "localhost", "::1"):
+            # 这个服务**没有鉴权** —— 绑到非回环地址意味着
+            # 局域网里任何设备都能连上来推音频、拿识别结果。
+            log.warning("⚠️ 监听地址是 %s —— 本服务**没有任何鉴权**，"
+                        "局域网内可被任意设备连接。仅在确有需要时这样启动。",
+                        HOST)
         await stop.wait()
         ws_server.close()
     log.info("服务退出")

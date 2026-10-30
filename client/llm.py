@@ -21,6 +21,7 @@ OpenAI 兼容 ``/v1/chat/completions``，只用标准库（``urllib``），零�
 
 from __future__ import annotations
 
+import http.client
 import json
 import re
 import socket
@@ -62,6 +63,23 @@ class LlmBadRequestError(LlmError):
     """请求格式错（如模型名不存在）—— 要告诉用户。"""
     degrade = False
     code = "bad_request"
+
+
+class LlmConfigError(LlmError):
+    """**地址本身写错了**（格式非法、端口不是数字…）—— 必须告诉用户去改。
+
+    为什么单独一类：它和"连不上"是两回事。
+
+    * 连不上 → 服务可能只是没启动，用户重试一下就好；
+    * 地址写错 → 用户改了才有用，报"连接失败"会让人一直查网络、查防火墙。
+
+    ``http://host:abc/v1`` 这种畸形地址在 ``urllib`` 内部抛的是
+    ``http.client.InvalidURL`` —— 它**既不是** ``URLError`` **也不是** ``OSError``，
+    所以以前会一路逃出 ``correct()``，把发起修正的线程打死
+    （实测：界面永远停在"修正中"，用户的话白说了）。
+    """
+    degrade = False
+    code = "config"
 
 
 class LlmTimeoutError(LlmError):
@@ -186,6 +204,11 @@ def normalize_base_url(url: str) -> str:
         http://localhost:8080/v1/chat/completions  → …/v1   （直接粘了完整端点）
         127.0.0.1:8317/v1                          → http://127.0.0.1:8317/v1（补协议）
         http://host:8000/api                       → 原样    （非标准路径不要乱补）
+
+    ⚠️ 本函数**绝不抛异常**：``urlsplit`` 遇到畸形 IPv6 会抛 ``ValueError``，
+    而它是在 ``LlmClient.__init__`` 里被调用的 —— 那里抛出去会一路炸到
+    ``default_client()``，程序根本起不来。所以解析不了就原样返回，
+    交给 :func:`check_base_url` 去报错。
     """
     text = (url or "").strip()
     if not text:
@@ -197,11 +220,60 @@ def normalize_base_url(url: str) -> str:
             break
     if "://" not in text:
         text = "http://" + text
-    parts = urllib.parse.urlsplit(text)
+    try:
+        parts = urllib.parse.urlsplit(text)
+    except ValueError:
+        return text          # 解析不了 → 原样留着，check_base_url 会给出人话提示
     # 只有路径为空或就是根时才补 /v1 —— 用户自己写了 /api 之类就别自作主张
     if parts.path in ("", "/"):
         text = text.rstrip("/") + "/v1"
     return text
+
+
+def check_base_url(base_url: str) -> Optional[str]:
+    """发请求**之前**检查地址格式。
+
+    返回 ``None`` = 没问题；返回一段**给用户看的中文说明** = 地址有问题。
+
+    为什么必须有这一步（BF-7）：``http://host:abc/v1`` 这种畸形地址在
+    ``http.client`` 里抛的是 ``InvalidURL`` —— 它**既不是** ``URLError``
+    **也不是** ``OSError**，以前会一路逃出 ``correct()`` 打死发起修正的线程
+    （实测：界面永远停在「修正中」，用户的话白说了）。
+
+    而且光靠"捕获"不够：把它归成「连接失败」是**误导** —— 用户会去查网络、
+    查防火墙，而真正要改的是地址里的那个端口。���以这里给出的是
+    「哪个地址不对 + 怎么改」。
+    """
+    text = (base_url or "").strip()
+    if not text:
+        return ("LLM 地址是空的。请在「设置 → LLM」里填上接口地址，"
+                "例如 http://127.0.0.1:8317/v1")
+    if any(ch.isspace() or ord(ch) < 0x21 for ch in text):
+        return ("LLM 地址「%s」里有空格或控制字符。"
+                "地址里不能有空格，正确格式形如 http://127.0.0.1:8317/v1" % text)
+    try:
+        parts = urllib.parse.urlsplit(text)
+    except ValueError as exc:
+        return ("LLM 地址「%s」无法解析（%s）。请检查有没有多余的括号或字符，"
+                "正确格式形如 http://127.0.0.1:8317/v1" % (text, exc))
+    if parts.scheme not in ("http", "https"):
+        return ("LLM 地址「%s」的协议不对。只支持 http:// 或 https://，"
+                "正确格式形如 http://127.0.0.1:8317/v1" % text)
+    try:
+        host = parts.hostname
+        port = parts.port
+    except ValueError as exc:
+        # 端口不是数字 / 超出 0-65535 —— ``urlsplit`` 是**惰性**报这个错的，
+        # 不主动取 ``.port`` 就永远发现不了。
+        return ("LLM 地址「%s」的端口不合法（%s）。端口必须是 1-65535 的数字，"
+                "正确格式形如 http://127.0.0.1:8317/v1" % (text, exc))
+    if not host:
+        return ("LLM 地址「%s」里没有主机名。"
+                "正确格式形如 http://127.0.0.1:8317/v1" % text)
+    if port is not None and not (1 <= port <= 65535):
+        return ("LLM 地址「%s」的端口 %d 超出范围。端口必须是 1-65535 的数字，"
+                "正确格式形如 http://127.0.0.1:8317/v1" % (text, port))
+    return None
 
 
 @dataclass
@@ -211,6 +283,11 @@ class Completion:
     elapsed_ms: float = 0.0
     usage: dict = field(default_factory=dict)
     finish_reason: str = ""
+    #: 失败时的说明。**空串 = 成功**。
+    #: ``complete()`` 不会抛异常（见那里的说明），失败全靠这三个字段汇报。
+    error: str = ""
+    code: str = ""                # 失败分类（auth / connection / config / timeout …）
+    notify: bool = False          # 是否要提示用户（配置类问题 = True）
 
 
 @dataclass
@@ -323,7 +400,35 @@ class LlmClient:
 
     # -- 底层 -------------------------------------------------------------- #
 
+    @staticmethod
+    def _error_completion(err: LlmError, elapsed_ms: float = 0.0) -> Completion:
+        """把一次失败包装成 ``Completion``。
+
+        ``complete()`` **不抛异常**（BF-7），失败全靠返回值里的
+        ``error`` / ``code`` / ``notify`` 汇报。理由见 :class:`LlmConfigError`：
+        以前一个畸形地址抛的 ``http.client.InvalidURL`` 会一路逃出去，
+        把发起修正的线程打死（界面永远停在"修正中"，用户的话白说了）。
+        """
+        return Completion(error=str(err), code=err.code,
+                          notify=not err.degrade, elapsed_ms=elapsed_ms)
+
     def complete(self, user_prompt: str, system: str = "") -> Completion:
+        """发一次补全请求。**绝不抛异常**。
+
+        失败时返回一个 ``error`` 非空的 ``Completion``，``code`` 标明失败分类
+        （auth / connection / config / timeout / …），``notify`` 标明要不要提示用户。
+
+        这样调用方（``correct()`` / ``translate()`` / ``test_connection()``）
+        不管遇到什么怪情况都拿得到一个**结构化**的结果，不会被一个
+        没预料到的异常掀翻。
+        """
+        # 地址先查格式。畸形地址（如 http://host:abc/v1）在 http.client 里
+        # 抛的是 InvalidURL —— 归类成「配置错误」并给出能看懂的提示，
+        # 而不是含糊的「连接失败」（用户改一下端口就行了，不该去查网络）。
+        problem = check_base_url(self.base_url)
+        if problem:
+            return self._error_completion(LlmConfigError(problem))
+
         url = self.base_url + "/chat/completions"
         messages = []
         if system:
@@ -350,26 +455,49 @@ class LlmClient:
                 detail = exc.read().decode("utf-8", "replace")[:200]
             except Exception:  # noqa: BLE001
                 pass
-            raise self._classify_http(exc.code, detail) from exc
-        except (socket.timeout, TimeoutError) as exc:
+            return self._error_completion(self._classify_http(exc.code, detail))
+        except urllib.error.URLError as exc:
+            reason = getattr(exc, "reason", exc)
+            if isinstance(reason, (socket.timeout, TimeoutError)):
+                if not self._probe_reachable():
+                    return self._error_completion(
+                        LlmConnectionError("连不上 %s（TCP 不可达）" % self.base_url))
+                return self._error_completion(
+                    LlmTimeoutError("请求超时（>%.0fs）" % self.timeout))
+            return self._error_completion(
+                LlmConnectionError("连不上 %s：%s" % (self.base_url, reason)))
+        except (socket.timeout, TimeoutError):
             # 超时有两种截然不同的原因，必须分开：
             #   "服务没起来" → 要提示用户；"模型太慢" → 静默降级
             # 某些环境下连一个没人监听的端口也是**超时**而不是拒绝连接，
             # 所以不能只看异常类型，得再探一次 TCP 可达性。
             if not self._probe_reachable():
-                raise LlmConnectionError(
-                    "连不上 %s（TCP 不可达，服务可能没启动）" % self.base_url) from exc
-            raise LlmTimeoutError("请求超时（>%.0fs）" % self.timeout) from exc
-        except urllib.error.URLError as exc:
-            reason = getattr(exc, "reason", exc)
-            if isinstance(reason, (socket.timeout, TimeoutError)):
-                if not self._probe_reachable():
-                    raise LlmConnectionError(
-                        "连不上 %s（TCP 不可达）" % self.base_url) from exc
-                raise LlmTimeoutError("请求超时（>%.0fs）" % self.timeout) from exc
-            raise LlmConnectionError("连不上 %s：%s" % (self.base_url, reason)) from exc
-        except json.JSONDecodeError as exc:
-            raise LlmServerError("返回的不是合法 JSON") from exc
+                return self._error_completion(LlmConnectionError(
+                    "连不上 %s（TCP 不可达，服务可能没启动）" % self.base_url))
+            return self._error_completion(
+                LlmTimeoutError("请求超时（>%.0fs）" % self.timeout))
+        except http.client.InvalidURL as exc:
+            # 地址里有 http.client 不认的东西（控制字符、畸形 IPv6…）
+            return self._error_completion(
+                LlmConfigError("LLM 地址无法使用：%s。地址里不能有空格或特殊字符，"
+                               "正确格式形如 http://127.0.0.1:8317/v1" % exc))
+        except http.client.HTTPException as exc:
+            # 响应层面的协议错误（连接被掐断、状态行不合法…）
+            return self._error_completion(
+                LlmConnectionError("与 %s 的连接异常：%s" % (self.base_url, exc)))
+        except json.JSONDecodeError:
+            return self._error_completion(LlmServerError("返回的不是合法 JSON"))
+        except ValueError as exc:
+            # urllib 对地址/参数的非预期用法（比如端口不是数字）
+            return self._error_completion(
+                LlmConfigError("请求地址或参数不合法：%s" % exc))
+        except OSError as exc:
+            return self._error_completion(
+                LlmConnectionError("连不上 %s：%s" % (self.base_url, exc)))
+        except Exception as exc:  # noqa: BLE001
+            # 最后一道兜底：**任何**异常都不许逃出去（BF-7）。
+            return self._error_completion(
+                LlmServerError("调用 LLM 时出现未预期的错误：%r" % (exc,)))
 
         elapsed = (time.monotonic() - t0) * 1000.0
         try:
@@ -388,8 +516,11 @@ class LlmClient:
                         "把 max_tokens 调大，或换一个非推理模型。"
                         % self.max_tokens)
                 text = reasoning
-        except (AttributeError, IndexError, TypeError) as exc:
-            raise LlmServerError("返回结构不符合 OpenAI 规范") from exc
+        except LlmTruncatedError as exc:
+            return self._error_completion(exc, elapsed)
+        except (AttributeError, IndexError, TypeError):
+            return self._error_completion(
+                LlmServerError("返回结构不符合 OpenAI 规范"), elapsed)
 
         return Completion(text=text, model=payload.get("model", self.model),
                           elapsed_ms=elapsed, usage=payload.get("usage") or {},
@@ -404,7 +535,14 @@ class LlmClient:
            ``llama-3.2-3b-instruct``）没人记得住，设置界面直接拉下来给用户选。
         2. 它同时是**最轻量的连通性检查** —— 能列出模型就说明地址和 Key 都对，
            比发一次真实的补全请求便宜得多，适合做成"测试连接"按钮。
+
+        和 ``complete()`` 不同，本方法**仍然抛异常** —— 但只抛 ``LlmError``
+        的子类（畸形地址归类成 ``LlmConfigError``），不抛任何没预料到的类型。
         """
+        problem = check_base_url(self.base_url)
+        if problem:
+            raise LlmConfigError(problem)
+
         url = self.base_url + "/models"
         headers = {"Accept": "application/json"}
         if self.api_key:
@@ -428,9 +566,18 @@ class LlmClient:
         except urllib.error.URLError as exc:
             raise LlmConnectionError("连不上 %s：%s"
                                      % (self.base_url, getattr(exc, "reason", exc))) from exc
+        except http.client.InvalidURL as exc:
+            raise LlmConfigError("LLM 地址无法使用：%s。地址里不能有空格或特殊字符，"
+                                 "正确格式形如 http://127.0.0.1:8317/v1" % exc) from exc
+        except http.client.HTTPException as exc:
+            raise LlmConnectionError("与 %s 的连接异常：%s" % (self.base_url, exc)) from exc
         except json.JSONDecodeError as exc:
             raise LlmServerError("返回的不是合法 JSON（该地址可能不是 OpenAI 兼容接口）"
                                  ) from exc
+        except ValueError as exc:
+            raise LlmConfigError("请求地址或参数不合法：%s" % exc) from exc
+        except OSError as exc:
+            raise LlmConnectionError("连不上 %s：%s" % (self.base_url, exc)) from exc
 
         data = payload.get("data")
         if not isinstance(data, list):
@@ -471,23 +618,27 @@ class LlmClient:
             saved_max = self.max_tokens
             try:
                 self.max_tokens = 8          # 探测别浪费配额
-                self.complete("hi")
-            except LlmError as exc:
-                return False, "列表里有「%s」，但实际调用失败：%s（%s）" % (
-                    self.model, exc, exc.code)
+                comp = self.complete("hi")
             except Exception as exc:  # noqa: BLE001
                 return False, "列表里有「%s」，但实际调用失败：%r" % (self.model, exc)
             finally:
                 self.max_tokens = saved_max
+            if comp.error:
+                return False, "列表里有「%s」，但实际调用失败：%s（%s）" % (
+                    self.model, comp.error, comp.code)
 
         return True, "连通，共 %d 个模型%s" % (
             len(models), "，已找到「%s」" % self.model if self.model else "")
 
     def _probe_reachable(self, timeout: float = 1.0) -> bool:
         """快速探一下 host:port 的 TCP 可达性，用来区分"服务没起来"和"模型太慢"。"""
-        parts = urllib.parse.urlsplit(self.base_url)
-        host = parts.hostname or "127.0.0.1"
-        port = parts.port or (443 if parts.scheme == "https" else 80)
+        try:
+            parts = urllib.parse.urlsplit(self.base_url)
+            host = parts.hostname or "127.0.0.1"
+            port = parts.port or (443 if parts.scheme == "https" else 80)
+        except ValueError:
+            # 地址本身就畸形（端口不是数字）→ 谈不上可达
+            return False
         try:
             with socket.create_connection((host, port), timeout=timeout):
                 return True
@@ -511,18 +662,40 @@ class LlmClient:
 
     def _run(self, prompt: str, original: str,
              hotwords: Optional[list[str]] = None) -> Outcome:
+        """跑一次修正/翻译，**必定**返回 ``Outcome``（绝不抛异常，BF-7）。
+
+        失败时 ``text`` 一律是**原文** —— 绝不能返回空串：
+        空串会让用户的话白说（app.py 里 ``done`` 状态虽然会设，
+        但注入的是空的，等于什么都没输入）。
+        """
         try:
             comp = self.complete(prompt)
-        except LlmError as exc:
-            self.last_error = str(exc)
-            return Outcome(text=original, degraded=True, notify=not exc.degrade,
-                           error=str(exc), code=exc.code)
+        except Exception as exc:  # noqa: BLE001  —— complete() 理论上不抛，
+            # 这里仍然兜住：任何异常都不许把调用方的线程带走。
+            self.last_error = repr(exc)
+            return Outcome(text=original, degraded=True, notify=True,
+                           error="调用 LLM 时出现未预期的错误：%r" % (exc,),
+                           code="internal")
+
+        if comp.error:
+            # 失败分类在这里落地：
+            #   * notify=True  → 配置类问题（地址错、Key 错），**必须提示用户**
+            #   * notify=False → 超时/限流/5xx 之类，静默降级，别打扰用户
+            self.last_error = comp.error
+            return Outcome(text=original, degraded=True, notify=comp.notify,
+                           error=comp.error, code=comp.code,
+                           elapsed_ms=comp.elapsed_ms)
+
         try:
             text = validate_output(original, comp.text, hotwords)
         except LlmBadOutputError as exc:
             self.last_error = str(exc)
             return Outcome(text=original, degraded=True, error=str(exc),
                            code=exc.code, elapsed_ms=comp.elapsed_ms)
+        except Exception as exc:  # noqa: BLE001
+            self.last_error = repr(exc)
+            return Outcome(text=original, degraded=True, error=repr(exc),
+                           code="internal", elapsed_ms=comp.elapsed_ms)
         changed = text.strip() != (original or "").strip()
         # degraded 与 no_change 都置位是**有意**的：
         #   * translator 靠 degraded 判断"这段没译出来"（原样返回等于没翻），语义不能变；
@@ -558,25 +731,50 @@ class LlmClient:
         return body
 
     def correct(self, text: str, hotwords: Optional[list[str]] = None) -> Outcome:
-        if not text.strip():
-            return Outcome(text=text, degraded=True, error="原文为空", code="empty")
-        prompt = self._build_prompt(self.correct_prompt, hotwords, text=text)
-        outcome = self._run(prompt + PLAIN_TEXT_SUFFIX, text, hotwords)
-        if self.strip_trailing_period and outcome.text.strip():
+        """修正一段识别文本。**必定**返回 ``Outcome``，绝不抛异常（BF-7）。
+
+        失败时 ``text`` 是**原文**（不是空串），并用 ``notify`` / ``code``
+        区分「配置错误（要提示用户）」和「静默降级（别打扰用户）」。
+        """
+        original = text if isinstance(text, str) else str(text or "")
+        try:
+            if not original.strip():
+                return Outcome(text=original, degraded=True, error="原文为空",
+                               code="empty")
+            prompt = self._build_prompt(self.correct_prompt, hotwords, text=original)
+            outcome = self._run(prompt + PLAIN_TEXT_SUFFIX, original, hotwords)
+        except Exception as exc:  # noqa: BLE001  —— 最后的兜底
+            self.last_error = repr(exc)
+            return Outcome(text=original, degraded=True, notify=True,
+                           error="修正时出现未预期的错误：%r" % (exc,),
+                           code="internal")
+        # 去结尾句号只在**模型真的出了结果**时做。失败降级时必须**原样**
+        # 返回原文 —— 绝不能顺手把原文的句号也改掉，那会让用户看到的东西
+        # 和自己说的不一样。
+        if self.strip_trailing_period and not outcome.error and outcome.text.strip():
             stripped = strip_trailing_period(outcome.text)
             if stripped != outcome.text:
                 outcome.text = stripped
-                outcome.changed = stripped.strip() != (text or "").strip()
+                outcome.changed = stripped.strip() != (original or "").strip()
                 outcome.degraded = not outcome.changed
                 outcome.no_change = not outcome.changed
         return outcome
 
     def translate(self, text: str, target_language: str = "English") -> Outcome:
-        if not text.strip():
-            return Outcome(text=text, degraded=True, error="原文为空", code="empty")
-        prompt = self._build_prompt(self.translate_prompt, None,
-                                    target_language=target_language, text=text)
-        return self._run(prompt + PLAIN_TEXT_SUFFIX, text)
+        """翻译一段文本。**必定**返回 ``Outcome``，绝不抛异常（BF-7）。"""
+        original = text if isinstance(text, str) else str(text or "")
+        try:
+            if not original.strip():
+                return Outcome(text=original, degraded=True, error="原文为空",
+                               code="empty")
+            prompt = self._build_prompt(self.translate_prompt, None,
+                                        target_language=target_language, text=original)
+            return self._run(prompt + PLAIN_TEXT_SUFFIX, original)
+        except Exception as exc:  # noqa: BLE001  —— 最后的兜底
+            self.last_error = repr(exc)
+            return Outcome(text=original, degraded=True, notify=True,
+                           error="翻译时出现未预期的错误：%r" % (exc,),
+                           code="internal")
 
 
 def default_client(cfg: Optional[dict] = None) -> LlmClient:

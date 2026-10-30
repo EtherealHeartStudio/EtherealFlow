@@ -6,7 +6,10 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=@APP_DIR@
-ExecStart=@APP_DIR@/start_stream_server.sh
+# 用 `bash <脚本>` 而不是直接执行脚本：
+# 仓库里 .sh 的 mode 是 100644（Windows 上没有 Unix 权限位），
+# 直接 ExecStart 会报 203/EXEC（实测踩过）。交给 bash 解释就不依赖执行位。
+ExecStart=/bin/bash @APP_DIR@/start_stream_server.sh
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1

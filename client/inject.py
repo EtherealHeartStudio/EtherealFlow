@@ -139,15 +139,34 @@ def clipboard_list_formats() -> list[int]:
     return formats
 
 
+#: 「**能安全备份并还原**」的剪贴板格式白名单。
+#:
+#: ⚠️ 白名单只列**纯文本类**格式。白名单之外的任何格式（位图、文件列表、
+#: 自定义格式……）我们**备份不了**，一旦 EmptyClipboard 就会**永久销毁**
+#: 用户的数据。
+#:
+#: 之前的白名单里混进了 CF_BITMAP(2) / CF_DIB(8) / CF_DIBV5(17) ——
+#: 那是「这些格式**不会**被当成非文本」的意思，于是**图片剪贴板检测不到**，
+#: 注入时直接被 EmptyClipboard 销毁（实测会丢用户的截图）。
+#:
+#: 这里改成：只有 CF_UNICODETEXT / CF_TEXT / CF_OEMTEXT / CF_LOCALE
+#: 算「可安全备份」，其余一律算 has_other → 触发「改用逐字键入」。
+CF_OEMTEXT = 7
+CF_LOCALE = 16
+
+#: 可安全备份的文本类格式
+_SAFE_TEXT_FORMATS = frozenset({CF_UNICODETEXT, CF_TEXT, CF_OEMTEXT, CF_LOCALE})
+
+
 def clipboard_snapshot() -> ClipboardSnapshot:
     snap = ClipboardSnapshot()
     if not _open_clipboard():
         return snap
     try:
         formats = clipboard_list_formats()
-        # 私有/无编号格式（0x0200+）与图片都算"非文本"
-        snap.has_other = any(f not in (CF_TEXT, CF_UNICODETEXT, 2, 7, 8, 16, 17)
-                             for f in formats)
+        # 只有「可安全备份的文本类」之外的格式才算 has_other。
+        # 私有/无编号格式（0x0200+）、位图、文件列表……全算。
+        snap.has_other = any(f not in _SAFE_TEXT_FORMATS for f in formats)
         if CF_UNICODETEXT in formats:
             snap.text = clipboard_get_text_locked()
             snap.has_text = snap.text is not None
@@ -205,19 +224,62 @@ def clipboard_set_text(text: str) -> bool:
 # 注入
 # --------------------------------------------------------------------------- #
 
+#: 注入结果的三态。
+#:
+#: 为什么不是 bool —— 「**发出去了**」和「**确认写进去了**」是两件事。
+#: 参考 typeflux 的 ``TextDeliveryResult{ delivered, unconfirmed, notApplied }``：
+#: 把「派发成功」与「确认写入」分开记录，否则用户会看到「注入成功」
+#: 但目标框里什么都没有。
+#:
+#: · ``delivered``    —— 已投递，且有证据表明目标接受了（回读到了内容）
+#: · ``unconfirmed``  —— 已投递，但**无法确认**目标是否接受
+#:                        （剪贴板路径拿不到回读证据时属于这一档）
+#: · ``not_applied``  —— 明确没进去（SendInput 被拒、目标不是输入框等）
+DELIVERED = "delivered"
+UNCONFIRMED = "unconfirmed"
+NOT_APPLIED = "not_applied"
+
+_STATUS_LABEL = {
+    DELIVERED: "已注入",
+    UNCONFIRMED: "已投递（未能确认目标是否接收）",
+    NOT_APPLIED: "未注入",
+}
+
+
 @dataclass
 class InjectResult:
-    ok: bool = False
+    #: 三态之一（见上面的 DELIVERED / UNCONFIRMED / NOT_APPLIED）
+    status: str = NOT_APPLIED
     method: str = ""
     target_title: str = ""
     target_class: str = ""
     target_pid: int = 0
     restored: bool = False
+    #: 剪贴板还原是否**已经结束**（无论成功与否）。
+    #: 调用方靠它判断「结果已经完整了，可以打最终日志了」——
+    #: 还原是延迟执行的（默认 500 ms 后），日志打得早就看不到还原结果。
+    restore_done: bool = False
     warnings: list[str] = field(default_factory=list)
     error: str = ""
 
+    @property
+    def ok(self) -> bool:
+        """兼容旧字段：只有「明确进去了」才算 ok。
+
+        ``unconfirmed`` **不算** ok —— 宁可让调用方知道「不确定」，
+        也不要给它一个假的成功。旧的 ``res.ok = True`` 赋值会走
+        ``__post_init__`` 之外，所以这里保留一个 setter 兼容。
+        """
+        return self.status == DELIVERED
+
+    @ok.setter
+    def ok(self, value: bool) -> None:
+        # 兼容旧的 `res.ok = True` 写法：True 记为「已投递但未确认」
+        # （因为旧代码无从确认），False 记为「未注入」。
+        self.status = UNCONFIRMED if value else NOT_APPLIED
+
     def describe(self) -> str:
-        bits = ["%s → %s [%s] pid=%d" % ("成功" if self.ok else "失败",
+        bits = ["%s → %s [%s] pid=%d" % (_STATUS_LABEL.get(self.status, self.status),
                                          self.target_title or "(无标题)",
                                          self.target_class, self.target_pid)]
         if self.method:
@@ -292,11 +354,33 @@ class Injector:
             return self._inject_typing(text, res)
 
         if not self._wait_clipboard_text(text):
-            res.warnings.append("剪贴板写入后回读不一致，仍继续尝试粘贴")
+            # 回读不一致 —— 剪贴板里**不是**我们要粘的内容。
+            # 继续按 Ctrl+V 会粘到旧内容（用户看到的是莫名其妙的另一段话），
+            # 比不粘更糟。改走逐字键入。
+            res.warnings.append("剪贴板写入后回读不一致（可能有剪贴板拦截层），"
+                                "改用逐字键入以免粘错内容")
+            return self._inject_typing(text, res)
 
-        press_ctrl_v()
+        # ⚠️ SendInput 的返回值**必须检查**：它返回实际插入的事件数，
+        # 返回 0 表示**一个都没插进去** —— 典型原因是目标窗口以更高权限运行
+        # （UIPI 拦截）。以前忽略返回值，无条件报「成功」，
+        # 结果是「报了成功但目标框里什么都没有」。
+        sent = press_ctrl_v()
+        if sent <= 0:
+            res.warnings.append("模拟 Ctrl+V 被系统拒绝（SendInput 返回 0，"
+                                "常见于目标程序以管理员权限运行）")
+            res.status = NOT_APPLIED
+            res.error = "SendInput 被拒绝"
+            # 剪贴板里还留着我们的内容 → 还原掉，别污染用户剪贴板
+            if self.restore_clipboard:
+                gen = self._next_generation()
+                threading.Thread(target=self._restore_later,
+                                 args=(text, snap, res, gen), daemon=True).start()
+            return res
+
         time.sleep(0.08)
-        res.ok = True
+        # 剪贴板路径拿不到「目标真的接收了」的证据 → 记为「已投递但未确认」
+        res.status = UNCONFIRMED
 
         if self.restore_clipboard:
             gen = self._next_generation()
@@ -316,6 +400,17 @@ class Injector:
                        res: InjectResult, generation: int) -> None:
         time.sleep(self.restore_delay_ms / 1000.0)
         res.restored = self._restore_now(injected, snap, generation)
+        if not res.restored:
+            # 还原失败**必须让用户知道** —— 否则剪贴板里会一直留着
+            # 我们注入的那段文字，而用户完全不知情。
+            # 两种情况：① 用户期间自己复制了别的（那不算失败，是正确的保护）
+            #            ② 真的还原失败（剪贴板被锁/拦截层）
+            if clipboard_get_text() == injected:
+                res.warnings.append("剪贴板未能还原（仍是你这次输入的内容）")
+            else:
+                res.warnings.append("剪贴板已恢复成你复制的内容（还原期间你复制了新东西）")
+        # 标记「结果已完整」——调用方据此决定何时打最终日志
+        res.restore_done = True
 
     def _restore_now(self, injected: str, snap: ClipboardSnapshot,
                      generation: int) -> bool:
@@ -352,11 +447,23 @@ class Injector:
     def _inject_typing(self, text: str, res: InjectResult) -> InjectResult:
         res.method = "SendInput 逐字键入"
         try:
-            type_unicode(text)
+            sent = type_unicode(text)
         except Exception as exc:  # noqa: BLE001
             res.error = "逐字键入失败：%r" % exc
+            res.status = NOT_APPLIED
             return res
-        res.ok = True
+        # type_unicode 返回成功插入的事件数；每个字符 2 个事件（按下+抬起）。
+        # 一半都没进去 = 被系统拒绝了。
+        if sent < len(text) * 2:
+            res.warnings.append("逐字键入只送出了 %d/%d 个事件"
+                                "（SendInput 可能被系统拦截，"
+                                "常见于目标程序以管理员权限运行）"
+                                % (sent, len(text) * 2))
+            res.status = NOT_APPLIED
+            res.error = "SendInput 被拒绝"
+            return res
+        # 逐字键入同样拿不到「目标接收了」的证据 → 未确认
+        res.status = UNCONFIRMED
         return res
 
 
