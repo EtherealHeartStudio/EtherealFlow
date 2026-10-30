@@ -77,6 +77,66 @@ class Target:
             pass
 
 
+def _check_injection_bf9(inject_mod, check) -> None:
+    """BF-9 的四条断言（注入失败判定）。
+
+    抽成独立函数是为了让「三态常量还不存在」（修复前）时能优雅报 FAIL，
+    而不是在这里 AttributeError 崩掉。
+    """
+    # G1. SendInput 返回 0 → 必须判为「未注入」，不能报成功
+    orig_press = inject_mod.press_ctrl_v
+    try:
+        inject_mod.press_ctrl_v = lambda: 0        # 模拟被系统拒绝
+        res_g1 = Injector(mode="clipboard").inject("会被拒绝的文本")
+        check("G. SendInput 返回 0 时判为未注入（不报假成功）",
+              res_g1.status == inject_mod.NOT_APPLIED
+              and not res_g1.ok
+              and bool(res_g1.warnings),
+              "status=%s ok=%s warnings=%s"
+              % (res_g1.status, res_g1.ok, res_g1.warnings))
+    finally:
+        inject_mod.press_ctrl_v = orig_press
+
+    # G2. 剪贴板回读不一致 → 不能继续粘贴（会粘错内容），要改走逐字键入
+    #     ⚠️ 要从 __dict__ 取原始的 staticmethod 对象 ——
+    #     ``Injector._wait_clipboard_text`` 取出的是**绑定后**的普通函数，
+    #     赋回去会变成实例属性（bound method），self 会吃掉第一个位置参数。
+    orig_wait = Injector.__dict__["_wait_clipboard_text"]
+    orig_type = inject_mod.type_unicode
+    typed_calls = []
+    try:
+        Injector._wait_clipboard_text = staticmethod(
+            lambda text, tries=5, delay=0.02: False)
+        inject_mod.type_unicode = lambda t: (typed_calls.append(t), len(t) * 2)[1]
+        res_g2 = Injector(mode="clipboard").inject("回读不一致的文本")
+        check("G. 剪贴板回读不一致时不粘贴，改走逐字键入",
+              bool(typed_calls) and res_g2.method != "剪贴板+Ctrl+V",
+              "method=%r 逐字键入被调用=%d 次 warnings=%s"
+              % (res_g2.method, len(typed_calls), res_g2.warnings))
+    finally:
+        Injector._wait_clipboard_text = orig_wait
+        inject_mod.type_unicode = orig_type
+
+    # G3. 三态：剪贴板路径成功投递 = 「已投递但未确认」，不是「确定成功」
+    res_g3 = Injector(mode="clipboard", restore_clipboard=False).inject("三态检查")
+    check("G. 注入结果是三态（投递≠确认写入）",
+          res_g3.status == inject_mod.UNCONFIRMED,
+          "status=%s（DELIVERED=%s / UNCONFIRMED=%s / NOT_APPLIED=%s）"
+          % (res_g3.status, inject_mod.DELIVERED,
+             inject_mod.UNCONFIRMED, inject_mod.NOT_APPLIED))
+
+    # G4. 图片类剪贴板格式必须被识别成「非文本」→ 改用逐字键入，不销毁它
+    #     旧的白名单把 CF_BITMAP(2)/CF_DIB(8)/CF_DIBV5(17) 当成安全格式，
+    #     于是图片剪贴板检测不到 → EmptyClipboard 直接销毁用户的截图。
+    check("G. 位图类格式被识别为非文本（不会被静默销毁）",
+          2 not in inject_mod._SAFE_TEXT_FORMATS
+          and 8 not in inject_mod._SAFE_TEXT_FORMATS
+          and 17 not in inject_mod._SAFE_TEXT_FORMATS,
+          "可安全备份的文本格式 = %s"
+          % sorted(inject_mod._SAFE_TEXT_FORMATS))
+
+
+
 def main() -> int:
     rows: list[tuple[str, bool, str]] = []
 
@@ -213,6 +273,44 @@ def main() -> int:
 
     target.close()
 
+    # ---------- G. BF-9：注入结果的三态与失败判定 ---------- #
+    # 以前这里全是「无条件报成功」：SendInput 被拒（目标以管理员权限运行）
+    # 也报成功，剪贴板回读不一致也照样粘贴，图片剪贴板还会被静默销毁。
+    # 这几条用 monkeypatch 制造失败，验证**真的能判出来**。
+    import client.inject as inject_mod
+
+    # 三态常量是这次修复**新增**的。修复前不存在 → 明确报 FAIL，
+    # 而不是 AttributeError 崩掉（崩掉看起来像脚本坏了，不像产品有缺陷）。
+    if not hasattr(inject_mod, "NOT_APPLIED"):
+        for name in ("G. SendInput 返回 0 时判为未注入（不报假成功）",
+                     "G. 剪贴板回读不一致时不粘贴，改走逐字键入",
+                     "G. 注入结果是三态（投递≠确认写入）",
+                     "G. 位图类格式被识别为非文本（不会被静默销毁）"):
+            check(name, False, "client.inject 里没有三态常量 —— "
+                               "注入失败判定还没实现（BF-9 未修复）")
+    else:
+        _check_injection_bf9(inject_mod, check)
+
+    # 还给用户原来的剪贴板
+    if backup.has_text:
+        clipboard_set_text(backup.text or "")
+
+    print("=" * 74)
+
+    # G2. 剪贴板回读不一致 → 不能继续粘贴（会粘错内容），要改走逐字键入
+    # ⚠️ 要从 ``__dict__`` 取原始的 staticmethod 对象 ——
+    # ``Injector._wait_clipboard_text`` 取出的是**绑定后**的普通函数，
+    # 赋回去会变成实例属性（bound method），self 会吃掉第一个位置参数。
+    # 还给用户原来的剪贴板
+    if backup.has_text:
+        clipboard_set_text(backup.text or "")
+
+    print("=" * 74)
+
+    # G2. 剪贴板回读不一致 → 不能继续粘贴（会粘错内容），要改走逐字键入
+    # ⚠️ 要从 ``__dict__`` 取原始的 staticmethod 对象 ——
+    # ``Injector._wait_clipboard_text`` 取出的是**绑定后**的普通函数，
+    # 赋回去会变成实例属性（bound method），self 会吃掉第一个位置参数。
     # 还给用户原来的剪贴板
     if backup.has_text:
         clipboard_set_text(backup.text or "")
