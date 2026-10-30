@@ -107,64 +107,143 @@ def check_bf12_1() -> None:
 # BF-12.3：设备按名称持久化
 # --------------------------------------------------------------------------- #
 
+def _fake_devices(spec: list[tuple[str, bool]]) -> list:
+    """造一张假的 ``sd.query_devices()`` 表。
+
+    ``spec`` 的每一项是 ``(设备名, 有没有输入口)``。
+
+    ## 为什么要这张表
+
+    实现里读设备列表有**两个入口**：``list_input_devices()``（过滤出有输入口的）
+    和 ``sd.query_devices()``（全部设备，含只有输出口的扬声器）。
+    以前用例只换掉了前者，后者读到的还是**本机真实的声卡列表** ——
+    而本机设备多，序号 1 总是「在范围内」，掩盖掉了 bug。
+    到了 CI runner（没有音频硬件，只有一两个虚拟设备），同一个 bug 就暴露了：
+    序号 1 被判定成越界 → 明明列表里有 1 号设备却退回系统默认。
+    **同一个缺陷，本机绿、CI 红。**
+
+    ## 关键：只换 ``sd.query_devices()``，让真的 ``list_input_devices()`` 去过滤
+
+    这样两个入口**永远一致**（前者本来就是后者的过滤结果），
+    不会出现「假设备表和真设备表对不上」的诡异失败。
+
+    ## 扬声器为什么必须在同一张表里
+
+    因为这正是缺陷的本质：存下来的序号可能指向一台**只有输出口**的设备
+    （序号 1 是扬声器、序号 2 才是麦克风）。
+    按 ``len(sd.query_devices())`` 判「序号还在不在范围内」会**放行**它 ——
+    程序于是去打开一台扬声器当麦克风（用户听自己的声音，识别出一堆乱码）。
+    正确的判据是「这个序号**是不是一台输入设备**」。
+    """
+    out = []
+    for name, has_input in spec:
+        out.append({"name": name,
+                    "max_input_channels": 2 if has_input else 0,
+                    "max_output_channels": 0 if has_input else 2,
+                    "default_samplerate": 48000.0})
+    return out
+
+
 def check_bf12_3() -> None:
     """设备序号会漂移 → 必须按名称重解析。
 
-    这里用**假设备表**把 ``list_input_devices`` 换掉，
-    模拟「同一支麦重启后换了序号」这个真实场景。
+    这里把 ``sd.query_devices()`` 换成**假设备表**，让真的
+    ``list_input_devices()`` 去过滤 —— 两个数据源永远一致，
+    用例结果**与跑它的机器有没有声卡无关**。
+
+    ⚠️ 以前只换了 ``list_input_devices``，后者读到的还是**本机真实的声卡列表**
+    —— 而本机设备多，序号 1 总是「在范围内」，掩盖掉了 bug。
+    到了 CI runner（没有音频硬件，只有一两个虚拟设备），同一个 bug 就暴露了：
+    序号 1 被判定成越界 → 明明列表里有 1 号设备却退回系统默认。
+    **同一个缺陷，本机绿、CI 红。**
     """
-    real_list = audio_mod.list_input_devices
     real_default = audio_mod.default_input_device
-
-    # 重启前：Realtek 是 1 号
-    audio_mod.list_input_devices = lambda: [(0, "CABLE Output"), (1, "Realtek Microphone"),
-                                            (2, "USB Mic")]
+    real_query = audio_mod.sd.query_devices
     audio_mod.default_input_device = lambda: 0
-    before = audio_mod.resolve_input_device(1, "Realtek Microphone")
-    check("BF-12.3 重启前按名称解析到正确设备", before == 1,
-          "解析结果=%r（设备表里 1 = Realtek Microphone）" % before)
 
-    # 重启后：Realtek 变成了 3 号（**序号漂移了**）
-    audio_mod.list_input_devices = lambda: [(0, "CABLE Output"), (1, "USB Mic"),
-                                            (2, "Headset"), (3, "Realtek Microphone")]
-    after = audio_mod.resolve_input_device(1, "Realtek Microphone")
-    check("BF-12.3 序号漂移后仍按名称找到同一支麦",
-          after == 3,
-          "解析结果=%r（现在是 3 号，不是存的旧序号 1）" % after)
+    try:
+        # 重启前：Realtek 是 1 号
+        audio_mod.sd.query_devices = lambda *a, **k: _fake_devices(
+            [("CABLE Output", True), ("Realtek Microphone", True),
+             ("USB Mic", True)])
+        before = audio_mod.resolve_input_device(1, "Realtek Microphone")
+        check("BF-12.3 重启前按名称解析到正确设备", before == 1,
+              "解析结果=%r（设备表里 1 = Realtek Microphone）" % before)
 
-    # 对照组：**只按序号**解析 → 选错设备
-    only_index = audio_mod.resolve_input_device(1, "")
-    check("BF-12.3 阳性对照：只按序号会选错设备（断言能红）",
-          only_index == 1 and only_index != after,
-          "只按序号=%r ≠ 按名称=%r" % (only_index, after))
+        # 重启后：Realtek 变成了 3 号（**序号漂移了**）
+        audio_mod.sd.query_devices = lambda *a, **k: _fake_devices(
+            [("CABLE Output", True), ("USB Mic", True),
+             ("Headset", True), ("Realtek Microphone", True)])
+        after = audio_mod.resolve_input_device(1, "Realtek Microphone")
+        check("BF-12.3 序号漂移后仍按名称找到同一支麦",
+              after == 3,
+              "解析结果=%r（现在是 3 号，不是存的旧序号 1）" % after)
 
-    # 设备名对不上（拔了）→ 退回序号
-    audio_mod.list_input_devices = lambda: [(0, "CABLE Output"), (1, "USB Mic")]
-    fallback = audio_mod.resolve_input_device(1, "Realtek Microphone")
-    check("BF-12.3 设备不在了时退回存的序号", fallback == 1,
-          "回退结果=%r" % fallback)
+        # 对照组：**只按序号**解析 → 选错设备
+        only_index = audio_mod.resolve_input_device(1, "")
+        check("BF-12.3 阳性对照：只按序号会选错设备（断言能红）",
+              only_index == 1 and only_index != after,
+              "只按序号=%r ≠ 按名称=%r" % (only_index, after))
 
-    # 都没有 → 系统默认
-    none_cfg = audio_mod.resolve_input_device(None, "")
-    check("BF-12.3 没指定设备时用系统默认", none_cfg == 0,
-          "默认设备=%r" % none_cfg)
+        # 设备名对不上（拔了）→ 退回序号
+        audio_mod.sd.query_devices = lambda *a, **k: _fake_devices(
+            [("CABLE Output", True), ("USB Mic", True)])
+        fallback = audio_mod.resolve_input_device(1, "Realtek Microphone")
+        check("BF-12.3 设备不在了时退回存的序号", fallback == 1,
+              "回退结果=%r" % fallback)
 
-    # 子串匹配：设备名带前后缀差异时仍认得出
-    audio_mod.list_input_devices = lambda: [(7, "Microphone (Realtek Audio)")]
-    substr = audio_mod.resolve_input_device(None, "Realtek Microphone")
-    check("BF-12.3 设备名有前后缀差异时仍能认出来（词序变化也算同一支）",
-          substr == 7, "解析结果=%r" % substr)
+        # 都没有 → 系统默认
+        none_cfg = audio_mod.resolve_input_device(None, "")
+        check("BF-12.3 没指定设备时用系统默认", none_cfg == 0,
+              "默认设备=%r" % none_cfg)
 
-    # ⚠️ 反面：不能**认得太松**。
-    # 「USB Mic」与「USB Speaker」有共同的词，但**不是**同一个设备 ——
-    # 认错了会把录音采到扬声器上（用户听自己的声音，识别出一堆乱码）。
-    audio_mod.list_input_devices = lambda: [(1, "USB Speaker"), (2, "USB Mic")]
-    wrong = audio_mod.resolve_input_device(None, "USB Mic")
-    check("BF-12.3 不同设备不会互相误认（USB Mic ≠ USB Speaker）",
-          wrong == 2, "解析结果=%r（应为 2 = USB Mic）" % wrong)
+        # 词序变化：设备名带前后缀差异时仍认得出
+        audio_mod.sd.query_devices = lambda *a, **k: _fake_devices(
+            [("Microphone (Realtek Audio)", True)])
+        substr = audio_mod.resolve_input_device(None, "Realtek Microphone")
+        check("BF-12.3 设备名有前后缀差异时仍能认出来（词序变化也算同一支）",
+              substr == 0, "解析结果=%r" % substr)
 
-    audio_mod.list_input_devices = real_list
-    audio_mod.default_input_device = real_default
+        # ⚠️ 反面：不能**认得太松**。
+        # 「USB Mic」与「USB Speaker」有共同的词，但**不是**同一个设备 ——
+        # 认错了会把录音采到扬声器上（用户听自己的声音，识别出一堆乱码）。
+        audio_mod.sd.query_devices = lambda *a, **k: _fake_devices(
+            [("USB Mic", True), ("USB Speaker", False)])
+        wrong = audio_mod.resolve_input_device(None, "USB Mic")
+        check("BF-12.3 不同设备不会互相误认（USB Mic ≠ USB Speaker）",
+              wrong == 0, "解析结果=%r（应为 0 = USB Mic）" % wrong)
+
+        # ⚠️ **CI 条件**：设备表很短（无声卡的机器只有一两个虚拟设备）。
+        # 序号有效性必须按**同一张表**判断 —— 以前拿
+        # ``len(sd.query_devices())`` 比，序号 1 会被判成越界。
+        audio_mod.sd.query_devices = lambda *a, **k: _fake_devices(
+            [("Microsoft Sound Mapper", True)])
+        short = audio_mod.resolve_input_device(0, "Microsoft Sound Mapper")
+        check("BF-12.3 设备表很短时（CI 条件）也能按序号兜底",
+              short == 0,
+              "解析结果=%r（设备表只有 1 项，序号 0 必须仍被认出来）" % short)
+
+        # ⚠️ 序号指向**只有输出口**的设备（扬声器）时，不能放行 ——
+        # 放行就等于去打开扬声器当麦克风（用户听自己的声音，识别出一堆乱码）。
+        # 旧判据 ``0 <= index < len(sd.query_devices())`` 会放行它。
+        audio_mod.sd.query_devices = lambda *a, **k: _fake_devices(
+            [("Mic A", True), ("Speaker B", False), ("Mic C", True)])
+        speaker = audio_mod.resolve_input_device(1, "")
+        check("BF-12.3 序号指向扬声器时不放行（不拿扬声器当麦克风）",
+              speaker != 1,
+              "解析结果=%r（1 号是只有输出口的设备，不能用）" % speaker)
+
+        # 但**确实是输入设备**的序号（哪怕序号不等于它在输入设备表里的位置）
+        # 必须能用 —— 输入设备表的索引与全表索引**不是一回事**。
+        audio_mod.sd.query_devices = lambda *a, **k: _fake_devices(
+            [("Speaker A", False), ("Mic B", True)])
+        real_input = audio_mod.resolve_input_device(1, "")
+        check("BF-12.3 序号指向真麦克风时能用（输入设备在全表里的索引）",
+              real_input == 1,
+              "解析结果=%r（1 号 = Mic B，是输入设备）" % real_input)
+    finally:
+        audio_mod.sd.query_devices = real_query
+        audio_mod.default_input_device = real_default
 
 
 def check_bf12_3_config() -> None:
@@ -178,15 +257,19 @@ def check_bf12_3_config() -> None:
     from client.config import deep_merge
     cfg = deep_merge(DEFAULT_CONFIG, {"audio": {"device": 1,
                                                  "device_name": "Realtek Microphone"}})
-    real_list = audio_mod.list_input_devices
-    audio_mod.list_input_devices = lambda: [(0, "X"), (5, "Realtek Microphone")]
+    real_query = audio_mod.sd.query_devices
+    # 同样是换 ``sd.query_devices()``（而不是 list_input_devices）——
+    # 两个入口保持一致，用例结果与机器无关。
+    audio_mod.sd.query_devices = lambda *a, **k: _fake_devices(
+        [("X", True), ("Pad", False), ("Y", False), ("Z", False),
+         ("Realtek Microphone", True)])
     try:
         got = audio_mod.resolve_input_device(cfg["audio"].get("device"),
                                              cfg["audio"].get("device_name", ""))
         check("BF-12.3 从配置读出的设备按名称重解析（序号已漂移）",
-              got == 5, "解析结果=%r" % got)
+              got == 4, "解析结果=%r" % got)
     finally:
-        audio_mod.list_input_devices = real_list
+        audio_mod.sd.query_devices = real_query
 
 
 # --------------------------------------------------------------------------- #

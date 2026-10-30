@@ -105,6 +105,9 @@ def resolve_input_device(index: Optional[int] = None,
     """
     devices = list_input_devices()
     if not devices:
+        # 一台输入设备都没有（CI runner、无声卡的虚拟机）。
+        # 这时**不能**去校验序号 —— 没有表可对。存下来的序号直接用，
+        # 让 sounddevice 自己去报错（那才是真实的失败）。
         return index
 
     wanted = (name or "").strip()
@@ -118,7 +121,18 @@ def resolve_input_device(index: Optional[int] = None,
             if _names_match(wanted, dev_name):
                 return idx
 
-    if index is not None and 0 <= index < len(sd.query_devices()):
+    # 名称对不上 → 退回存下来的序号。
+    #
+    # ⚠️ 有效性判断必须用**同一张表**（``devices``，也就是
+    # ``list_input_devices()``），不能拿 ``len(sd.query_devices())`` 去比。
+    # ``sd.query_devices()`` 包含只有输出端口的设备（扬声器等），
+    # 序号空间比输入设备表**大**；反过来在 CI runner 上它又可能**更小**
+    # （无声卡 → 只剩一两个虚拟设备）。
+    # 两种情况下都会判错：
+    #   · 本机：序号 20 可能落在「扬声器」那一段 → 越界 → 明明有这设备却退回默认
+    #   · CI：序号 1 > 总数 → 越界 → 明明列表里有 1 号设备却退回默认
+    # （实测：CI 上这条把两条用例打红，本机因设备多而看不出来。）
+    if index is not None and any(idx == index for idx, _ in devices):
         return index
     return default_input_device()
 
