@@ -289,6 +289,14 @@ class Server:
         self.clients += 1
         log.info("客户端接入 %s（当前 %d 个连接）", peer, self.clients)
         session: Optional[Session] = None
+        # 「本连接当前是否接受音频」。
+        # finish / cancel 之后置 False：这段时间到达的音频属于**下一次**会话，
+        # 服务端此时若按默认参数自动开新会话，客户端随后发的 start 会把它丢弃 ——
+        # 那段音频的文本就永远进不了 final（实测丢 32%）。
+        # 正常客户端会自己扣住这段音频不发；这里是**兜底**，
+        # 防止漏帧时污染新会话。
+        accepting = True
+        dropped_after_finish = 0
         try:
             await websocket.send(json.dumps({
                 "type": "ready",
@@ -304,6 +312,12 @@ class Server:
                     if len(raw) % 2:  # int16 对齐保护
                         raw = raw[:-1]
                     if not raw:
+                        continue
+                    if not accepting:
+                        # 已经 finish/cancel 过 —— 这段音频属于下一次会话，
+                        # 丢掉它，但**不要**自动开新会话（那会丢掉用户的
+                        # language/context，还会被随后的 start 丢弃）。
+                        dropped_after_finish += 1
                         continue
                     if session is None:
                         session = Session(self.engine, DEFAULT_LANGUAGE, DEFAULT_CONTEXT)
@@ -325,11 +339,33 @@ class Server:
 
                 if mtype == "start":
                     if session is not None and not session.finished:
-                        log.info("%s 重开会话，丢弃旧会话（%.2f s）", peer, session.duration)
+                        # 旧会话还有没收尾的内容 —— **先把它 flush 出来**再丢。
+                        # 不 flush 就丢，那些音频的文本就永远拿不到了。
+                        # 正常流程下客户端会先发 finish（session 已是 None），
+                        # 走不到这里；这是给「漏发 finish」的兜底。
+                        #
+                        # ⚠️ 只在旧会话**真的有内容**时才 flush：
+                        # 空会话 flush 出来是个空 final，客户端会把它当成
+                        # 「这一段说完了」→ 提前结束、丢掉后面所有内容
+                        # （实测 chunks=0、识别结果为空）。
+                        if session.duration > 0 or session.chunks > 0:
+                            try:
+                                stale = await asyncio.to_thread(session.flush)
+                                stale_stats = session.stats()
+                                log.info("%s 重开会话，先收尾旧会话：%.2f s → %d 字",
+                                         peer, stale_stats["duration"], len(stale))
+                                await websocket.send(json.dumps(
+                                    {"type": "final", "text": stale, **stale_stats},
+                                    ensure_ascii=False))
+                            except Exception as exc:  # noqa: BLE001
+                                log.warning("收尾旧会话失败（丢弃）：%r", exc)
+                        else:
+                            log.info("%s 重开会话，旧会话是空的（丢弃）", peer)
                     language = payload.get("language")
                     language = str(language).strip() if language else None
                     context = payload.get("context") or DEFAULT_CONTEXT
                     session = Session(self.engine, language or None, str(context))
+                    accepting = True
                     log.info("%s start: language=%s context=%r", peer, language, context[:60])
                     await websocket.send(json.dumps(
                         {"type": "started", "language": language, "context": str(context)},
@@ -346,11 +382,14 @@ class Server:
                     await websocket.send(json.dumps(
                         {"type": "final", "text": final, **stats}, ensure_ascii=False))
                     session = None
+                    # 之后到达的音频属于下一次会话 —— 别自动开默认会话污染它。
+                    accepting = False
 
                 elif mtype == "cancel":
                     log.info("%s cancel（丢弃 %.2f s 音频）",
                              peer, session.duration if session else 0.0)
                     session = None
+                    accepting = False
                     await websocket.send(json.dumps({"type": "cancelled"}, ensure_ascii=False))
 
                 elif mtype == "ping":
@@ -363,6 +402,11 @@ class Server:
             log.warning("连接 %s 异常结束：%r", peer, exc)
         finally:
             self.clients -= 1
+            if dropped_after_finish:
+                # 客户端没扣住这段音频（旧版本客户端，或时序极端情况）。
+                # 记一笔，方便回头查「为什么少了内容」。
+                log.info("连接 %s 结束：finish 后到达的音频被丢弃 %d 块（约 %.1f 秒）",
+                         peer, dropped_after_finish, dropped_after_finish * 0.16)
             log.info("客户端断开 %s（剩余 %d 个连接）", peer, self.clients)
 
     @staticmethod
