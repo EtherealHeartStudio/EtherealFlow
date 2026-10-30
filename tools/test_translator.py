@@ -7,10 +7,24 @@
 * 句末标点触发
 * 静默 ~1.5 秒触发
 * 缓冲超过 N 字触发
-* **只翻译新增部分**：所有送去翻译的原文拼起来，必须恰好等于"已落定的原文"，
-  一个字都不能重复翻（这就是需求文档说的"不要每来一个字就调一次 LLM"）
+* **只翻译新增部分**：所有送去翻译的原文必须与已落定的原文**逐段一致**
+  （不重复、不遗漏、不乱序）—— 这就是需求文档说的"不要每来一个字就调一次 LLM"
 * 后端回退时，受影响的尾部段要重译而不是硬拼
 * 翻译全失败时，`finish()` 必须回退成原文（不能提交空串）
+
+外加本轮修的三个缺陷：
+
+* **BF-10** 翻译方向逐段判断 → 一句话被劈成两种语言。
+  现在方向**整个会话只判一次**并锁死；设置里显式指定目标语言时用用户的值。
+  断言：混说会话里所有 LLM 调用用的是**同一个**方向。
+* **BF-11** 翻译失败静默吞掉整句（且 `degraded` 因运算符优先级恒为 False）。
+  现在失败会**重试一次**，仍失败则该段**回退为原文**并入译文，
+  `degraded` 必须为 True，日志里要写明「N 段翻译失败，已回退原文」。
+* **BF-8** 自检断言恒真。原来那行
+  ``sent == "".join(dict.fromkeys([sent]))`` 对**任意字符串**恒真
+  （`dict.fromkeys([sent])` 是 `{sent: None}`，join 出来还是 `sent`），
+  等于什么都没断言。现在换成真正能失败的性质，并补了**阳性对照**：
+  故意让实现返回坏结果（复现旧 bug 的坏实现），同一套断言**必须变红**。
 
 退出码 0 = 通过。
 """
@@ -29,8 +43,40 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from client.llm import Outcome                      # noqa: E402
 from client.textutil import needs_space, smart_join  # noqa: E402
-from client.translator import (IncrementalTranslator, guess_target_language,  # noqa: E402
-                               last_sentence_end)
+from client.translator import (IncrementalTranslator,  # noqa: E402
+                               guess_target_language, last_sentence_end,
+                               resolve_target_language)
+
+
+# --------------------------------------------------------------------------- #
+# 判定谓词（抽成函数，好让阳性对照复用**同一套**判定）
+# --------------------------------------------------------------------------- #
+
+def check_only_new_parts(sources, segments) -> bool:
+    """「只翻译新增部分」：送去翻译的原文 == 已落定的原文（逐段、逐序）。
+
+    这条性质**能失败**：实现若重复送翻一段、或漏翻一段、或顺序乱了，
+    这里就会返回 False。
+
+    （原实现写的是 ``sent == "".join(dict.fromkeys([sent]))`` ——
+    ``dict.fromkeys([sent])`` 是 ``{sent: None}``，join 出来还是 ``sent``，
+    于是 ``sent == sent`` 恒真，什么都没断言。）
+    """
+    return [s for s, _t in sources] == [s for s, _t in segments]
+
+
+def check_single_direction(sources) -> bool:
+    """BF-10：整个会话的翻译方向必须**一致**（一句话不能劈成两种语言）。"""
+    targets = [t for _s, t in sources]
+    return len(set(targets)) <= 1
+
+
+def check_failed_kept(text: str, failed_source: str) -> bool:
+    """BF-11：翻译失败的段落，它的**原文**必须还在最终文本里。
+
+    丢掉 = 用户说的那句话凭空消失，而用户和日志都看不出来。
+    """
+    return failed_source in text
 
 
 class FakeEnglishLlm:
@@ -70,6 +116,61 @@ class FakeLlm:
         return Outcome(text="<%s>" % text.strip(), changed=True)
 
 
+class SelectiveFailLlm(FakeLlm):
+    """只对指定的那一段翻译失败，其余正常 —— 用来测「中间段失败」。"""
+
+    def __init__(self, fail_source: str) -> None:
+        super().__init__()
+        self.fail_source = fail_source
+
+    def translate(self, text: str, target: str = "English") -> Outcome:
+        self.sources.append((text, target))
+        if text.strip() == self.fail_source:
+            return Outcome(text=text, degraded=True, error="假失败", code="server")
+        return Outcome(text="<%s>" % text.strip(), changed=True)
+
+
+# --------------------------------------------------------------------------- #
+# 阳性对照用的**坏实现**（复现旧 bug，用来证明断言不是恒真）
+# --------------------------------------------------------------------------- #
+
+class DroppingTranslator(IncrementalTranslator):
+    """故意坏掉的实现 —— 复现 BF-11 的老 bug：**失败段直接丢弃**。
+
+    旧实现里某段翻译失败就不把它追加进译文，于是注入的文本**悄悄少了
+    那一句话**。这里用同一个钩子（``_fallback_text``）复现它。
+
+    阳性对照的价值：同一套断言在这个坏实现上**必须变红** ——
+    否则说明断言恒真，等于什么都没检查。
+    """
+
+    def _fallback_text(self, source: str, err: str) -> str:
+        return ""            # ← 丢弃这一段（旧行为）
+
+
+class PerSegmentDirectionTranslator(IncrementalTranslator):
+    """故意坏掉的实现 —— 复现 BF-10 的老 bug：**每段各自判方向**。
+
+    中英混说时前半段译成英文、后半段译成中文，一句话被劈成两种语言。
+    """
+
+    def _resolve_target(self, source: str) -> str:
+        return guess_target_language(source)      # ← 逐段重判（旧行为）
+
+
+class DuplicateSendTranslator(IncrementalTranslator):
+    """故意坏掉的实现 —— **同一段原文送去翻译了两次**。
+
+    这是「只翻译新增部分」这条断言要防的事：多翻一遍就是白花 LLM 的钱，
+    而且和"追加式"设计冲突。
+    """
+
+    def _call_llm(self, source: str, target: str):
+        out = super()._call_llm(source, target)   # 第一次（会被记进 sources）
+        super()._call_llm(source, target)          # ← 第二次：同一段又送了一遍
+        return out
+
+
 def wait_for(pred, timeout=3.0):
     end = time.monotonic() + timeout
     while time.monotonic() < end:
@@ -77,6 +178,92 @@ def wait_for(pred, timeout=3.0):
             return True
         time.sleep(0.02)
     return False
+
+
+# --------------------------------------------------------------------------- #
+# 场景（抽成函数，阳性对照要跑**同一套**场景）
+# --------------------------------------------------------------------------- #
+
+MIX_FIRST = "今天开会讨论新版本。"
+MIX_SECOND = "Let's discuss the new version."
+FAILED_SRC = "第二句失败。"
+
+
+def run_mixed_direction_scenario(translator_cls):
+    """中英混说 → 返回 (llm, result)。
+
+    第一段是中文（逐段判断会译成英文），第二段是英文（逐段判断会译成中文）。
+    正确实现：整个会话**一个方向**。
+    """
+    llm = FakeLlm()
+    tr = translator_cls(llm, target_language="auto", silence_sec=0.3,
+                        chunk_chars=999, on_error=lambda _m: None)
+    tr.start()
+    tr.update(MIX_FIRST)
+    wait_for(lambda: len(llm.sources) >= 1)
+    tr.update(MIX_FIRST + MIX_SECOND)
+    wait_for(lambda: len(llm.sources) >= 2)
+    res = tr.finish(MIX_FIRST + MIX_SECOND)
+    return llm, res
+
+
+def run_mid_failure_scenario(translator_cls):
+    """中间一段翻译失败 → 返回 (llm, result)。"""
+    llm = SelectiveFailLlm(FAILED_SRC)
+    tr = translator_cls(llm, target_language="English", silence_sec=0.3,
+                        chunk_chars=999, on_error=lambda _m: None)
+    tr.start()
+    tr.update("第一句。")
+    wait_for(lambda: len(llm.sources) >= 1)
+    tr.update("第一句。" + FAILED_SRC)
+    wait_for(lambda: len(llm.sources) >= 3)      # 1 次首发 + 1 次重试
+    res = tr.finish("第一句。" + FAILED_SRC)
+    return llm, res
+
+
+def run_positive_control(repeat: int = 3) -> list[tuple[str, bool, str]]:
+    """阳性对照（BF-8.2）：故意让实现返回坏结果，断言**必须失败**。
+
+    这条对照必须能**重复跑** —— 跑 3 遍，结论一致才算数。
+    """
+    rows: list[tuple[str, bool, str]] = []
+
+    for i in range(repeat):
+        # --- BF-10 的坏实现：逐段判方向 --- #
+        llm, _res = run_mixed_direction_scenario(PerSegmentDirectionTranslator)
+        bad_targets = sorted(set(t for _s, t in llm.sources))
+        rows.append((
+            "阳性对照（第 %d 遍）：坏实现逐段判方向 → 「方向一致」断言必须失败" % (i + 1),
+            not check_single_direction(llm.sources),
+            "坏实现的方向=%r（一致判定=%s）"
+            % (bad_targets, check_single_direction(llm.sources))))
+
+        # --- BF-11 的坏实现：失败段被丢弃 --- #
+        llm2, res2 = run_mid_failure_scenario(DroppingTranslator)
+        kept = check_failed_kept(res2.text, FAILED_SRC)
+        rows.append((
+            "阳性对照（第 %d 遍）：坏实现丢弃失败段 → 「那句话还在」断言必须失败" % (i + 1),
+            not kept,
+            "坏实现的最终文本=%r（那句话在不在=%s）" % (res2.text, kept)))
+
+        # --- BF-8 的坏实现：同一段被送去翻译了两次 --- #
+        llm3 = FakeLlm()
+        tr3 = DuplicateSendTranslator(llm3, target_language="English",
+                                      silence_sec=0.3, chunk_chars=999)
+        tr3.start()
+        tr3.update("一句话。")
+        wait_for(lambda: len(llm3.sources) >= 2)      # 坏实现：一段送了两遍
+        tr3.update("一句话。第二句。")
+        wait_for(lambda: len(llm3.sources) >= 4)
+        res3 = tr3.finish("一句话。第二句。")
+        same = check_only_new_parts(llm3.sources, res3.segments)
+        rows.append((
+            "阳性对照（第 %d 遍）：坏实现重复送翻 → 「只翻新增部分」断言必须失败" % (i + 1),
+            not same,
+            "送翻=%r 已落定=%r（判定=%s）"
+            % ([s for s, _t in llm3.sources], [s for s, _t in res3.segments], same)))
+
+    return rows
 
 
 def main() -> int:
@@ -95,6 +282,14 @@ def main() -> int:
     check("方向自动判断：英文 → Chinese",
           guess_target_language("hello world") == "Chinese",
           guess_target_language("hello world"))
+    check("显式指定目标语言时用用户的值，不猜",
+          resolve_target_language("English", "这是一段中文") == "English"
+          and resolve_target_language("Chinese", "hello world") == "Chinese",
+          resolve_target_language("English", "这是一段中文"))
+    check("配置为 auto 时才自动判断",
+          resolve_target_language("auto", "这是一段中文") == "English"
+          and resolve_target_language("", "hello world") == "Chinese",
+          resolve_target_language("auto", "这是一段中文"))
 
     # ---------- 拼接（真机联调踩到的坑） ---------- #
     check("英文句末 + 英文句首 → 补空格",
@@ -135,9 +330,12 @@ def main() -> int:
     check("句末标点触发：已落定的原文都翻过，且没有落定段被漏掉",
           closed in sent and sent.startswith(closed),
           "送翻=%r 已落定=%r" % (sent, closed))
-    check("只翻译新增部分：送去翻译的原文没有重复",
-          sent == "".join(dict.fromkeys([sent])) and "。然后继续测试。" in sent,
-          "送翻序列=%r" % [s for s, _t in llm.sources])
+    # BF-8：原来这行恒真（`dict.fromkeys([sent])` → `{sent: None}`），
+    # 现在断言的是"送去翻译的原文与已落定原文逐段一致"—— 能失败。
+    check("只翻译新增部分：送去翻译的原文与已落定原文逐段一致（不重不漏）",
+          check_only_new_parts(llm.sources, res.segments),
+          "送翻=%r 已落定=%r" % ([s for s, _t in llm.sources],
+                                [s for s, _t in res.segments]))
     check("译文是各段落译文的拼接（纯追加）",
           res.text == "<我们今天测试一下，这个语音输入法。><然后继续测试。>",
           repr(res.text))
@@ -223,6 +421,66 @@ def main() -> int:
     check("已落定段不被重译（段数 == 调用次数）",
           len(res7.segments) == len(en.sources) and len(en.sources) >= 2,
           "段=%d 调用=%d %s" % (len(res7.segments), len(en.sources), en.sources))
+
+    # ---------- BF-10：翻译方向整个会话只判一次 ---------- #
+    mix_llm, mix_res = run_mixed_direction_scenario(IncrementalTranslator)
+    mix_targets = [t for _s, t in mix_llm.sources]
+    check("BF-10 中英混说时全程方向一致（不劈成两种语言）",
+          check_single_direction(mix_llm.sources),
+          "各段目标=%r" % mix_targets)
+    check("BF-10 方向在第一次翻译时判定并锁死（构造时还没判）",
+          mix_res.target != "" and mix_res.target == mix_targets[0],
+          "锁定的方向=%r 实际用的=%r" % (mix_res.target, mix_targets))
+    check("BF-10 判定后的方向不再随后面的段落改变",
+          len(set(mix_targets)) == 1,
+          "第一段=%r 之后=%r" % (mix_targets[:1], mix_targets[1:]))
+
+    # 显式指定目标语言 → 用用户的值，且不猜
+    exp_llm = FakeLlm()
+    exp_tr = IncrementalTranslator(exp_llm, target_language="Chinese",
+                                   silence_sec=0.3, chunk_chars=999)
+    exp_tr.start()
+    exp_tr.update(MIX_FIRST)
+    wait_for(lambda: len(exp_llm.sources) >= 1)
+    exp_tr.update(MIX_FIRST + MIX_SECOND)
+    wait_for(lambda: len(exp_llm.sources) >= 2)
+    exp_res = exp_tr.finish(MIX_FIRST + MIX_SECOND)
+    exp_targets = [t for _s, t in exp_llm.sources]
+    check("BF-10 显式指定目标语言时全程用用户的值",
+          exp_targets and set(exp_targets) == {"Chinese"},
+          "各段目标=%r" % exp_targets)
+    check("BF-10 显式指定时方向构造后即可知（不用等文本）",
+          exp_tr.session_target == "Chinese",
+          "session_target=%r" % exp_tr.session_target)
+    check("BF-10 auto 模式在第一次翻译前方向未定",
+          IncrementalTranslator(FakeLlm(), target_language="auto").session_target is None,
+          "auto 的 session_target=%r"
+          % IncrementalTranslator(FakeLlm(), target_language="auto").session_target)
+
+    # ---------- BF-11：失败段重试 + 回退原文 + degraded ---------- #
+    fail_llm, fail_res = run_mid_failure_scenario(IncrementalTranslator)
+    fail_sources = [s for s, _t in fail_llm.sources]
+    check("BF-11 失败的段落会重试一次（首发 + 重试 = 2 次调用）",
+          fail_sources.count(FAILED_SRC) == 2,
+          "失败段的调用次数=%d 全部=%r" % (fail_sources.count(FAILED_SRC), fail_sources))
+    check("BF-11 成功的段落不会被重试",
+          fail_sources.count("第一句。") == 1,
+          "成功段的调用次数=%d" % fail_sources.count("第一句。"))
+    check("BF-11 失败的段落回退为原文并入译文（那句话还在）",
+          check_failed_kept(fail_res.text, FAILED_SRC),
+          "最终文本=%r" % fail_res.text)
+    check("BF-11 有段失败时 degraded 必须为 True",
+          fail_res.degraded,
+          "degraded=%s failed=%d" % (fail_res.degraded, fail_res.failed))
+    check("BF-11 失败计数是段数（不是调用次数）",
+          fail_res.failed == 1,
+          "failed=%d" % fail_res.failed)
+    check("BF-11 日志说明里写明「N 段翻译失败，已回退原文」",
+          "1 段翻译失败，已回退原文" in fail_res.describe(),
+          repr(fail_res.describe()))
+
+    # ---------- BF-8：阳性对照（人为破坏实现，断言必须变红） ---------- #
+    rows.extend(run_positive_control(repeat=3))
 
     print("=" * 74)
     print("P4 验证：增量流式翻译")
