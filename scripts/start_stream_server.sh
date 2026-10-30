@@ -16,7 +16,10 @@ export LD_LIBRARY_PATH="$VENV/lib/python3.12/site-packages/nvidia/cuda_runtime/l
 export GGUF_DIR="${GGUF_DIR:-$WS/models/r2t2}"
 export R2T2_REPO="${R2T2_REPO:-$WS/runtime/r2t2/Confucius4-R2T2}"
 export R2T2_HF_DIR="${R2T2_HF_DIR:-$WS/runtime/r2t2-hf}"
-export R2T2_STREAM_HOST="${R2T2_STREAM_HOST:-0.0.0.0}"
+# 默认只绑回环 —— 这个服务**没有鉴权**，绑到 0.0.0.0 等于开放给整个局域网。
+# 需要局域网访问时显式设 R2T2_STREAM_HOST=0.0.0.0。
+# （WSL2 的 localhost 转发对回环绑定照样有效，Windows 侧照常连 127.0.0.1。）
+export R2T2_STREAM_HOST="${R2T2_STREAM_HOST:-127.0.0.1}"
 export R2T2_STREAM_PORT="${R2T2_STREAM_PORT:-18300}"
 export R2T2_CHUNK_MS="${R2T2_CHUNK_MS:-160}"
 export R2T2_LOG_DIR="${R2T2_LOG_DIR:-$WS/runtime/logs}"
