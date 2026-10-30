@@ -442,11 +442,17 @@ class LlmClient:
                 ids.append(str(mid))
         return sorted(ids)
 
-    def test_connection(self) -> tuple[bool, str]:
+    def test_connection(self, probe_call: bool = True) -> tuple[bool, str]:
         """给设置界面的「测试连接」用：返回 ``(是否通, 给人看的说明)``。
 
         这里把 ``LlmError`` 的分类**原样保留**成文字，因为分类本身就是给用户看的
         诊断结论：Key 错了和模型太慢是两件完全不同的事，不能都显示"连接失败"。
+
+        ``probe_call=True`` 时会**真的发一次最小请求**。
+        ⚠️ 为什么不能只查模型列表：列表里**有**这个模型 ≠ 这个模型**能用**。
+        实测踩过：代理端把 ``gpt-5.6-sol`` 列在 ``/v1/models`` 里，
+        但实际调用返回 ``usage_limit_reached``（配额用尽）——
+        只查列表的话，设置界面显示「✓ 连通」，用户一用就失败。
         """
         try:
             models = self.list_models()
@@ -459,6 +465,21 @@ class LlmClient:
         if self.model and self.model not in models:
             return True, ("连通，共 %d 个模型；但没找到「%s」，请确认名字拼写"
                           % (len(models), self.model))
+
+        if probe_call and self.model:
+            # 真发一次最小请求，确认这个模型**真的能用**
+            saved_max = self.max_tokens
+            try:
+                self.max_tokens = 8          # 探测别浪费配额
+                self.complete("hi")
+            except LlmError as exc:
+                return False, "列表里有「%s」，但实际调用失败：%s（%s）" % (
+                    self.model, exc, exc.code)
+            except Exception as exc:  # noqa: BLE001
+                return False, "列表里有「%s」，但实际调用失败：%r" % (self.model, exc)
+            finally:
+                self.max_tokens = saved_max
+
         return True, "连通，共 %d 个模型%s" % (
             len(models), "，已找到「%s」" % self.model if self.model else "")
 
